@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>ระบบวิเคราะห์ต้นทุนอาหาร & สเปกวัตถุดิบครัวแสนสุข (Live Sync)</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- MQTT over WebSockets for Multi-Device Real-Time Sync -->
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <!-- QRCode Generator for Mobile Sharing -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <!-- Google Fonts: Sarabun & Prompt -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700;800&family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Prompt', 'Sarabun', sans-serif;
+            background-color: #f8fafc;
+            -webkit-tap-highlight-color: transparent;
+        }
+        @media print {
+            .print\\:hidden { display: none !important; }
+            body { background: white !important; font-size: 11pt !important; padding-bottom: 0 !important; }
+            .print-header { display: block !important; }
+            .break-inside-avoid { break-inside: avoid; }
+        }
+        /* Mobile safe area padding */
+        .pb-safe {
+            padding-bottom: env(safe-area-inset-bottom, 1rem);
+        }
+    </style>
+</head>
+<body class="text-slate-800 antialiased min-h-screen flex flex-col pb-20 md:pb-0">
+
+    <!-- Top Navigation & Branding Header -->
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-40 shadow-xs print:hidden">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex flex-col md:flex-row md:items-center md:justify-between py-3 gap-3">
+                <!-- Brand & Status -->
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 md:w-11 md:h-11 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center text-white text-xl shadow-md shrink-0">
+                            🦀
+                        </div>
+                        <div>
+                            <div class="flex items-center gap-2">
+                                <h1 class="text-base md:text-lg font-black text-slate-900 tracking-tight">ครัวแสนสุข</h1>
+                                <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
+                                    Cost &le; 40%
+                                </span>
+                            </div>
+                            <!-- Live Multi-Device Sync Indicator -->
+                            <div class="flex items-center gap-1.5 mt-0.5">
+                                <span id="live-sync-indicator" class="w-2.5 h-2.5 rounded-full bg-amber-500 animate-ping"></span>
+                                <span id="live-sync-text" class="text-[11px] font-medium text-amber-700">กำลังเชื่อมต่อทีม...</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Quick Share Button on Mobile Header -->
+                    <button id="share-btn" class="md:hidden px-3 py-1.5 text-xs font-bold rounded-xl bg-blue-50 text-blue-700 border border-blue-200 shadow-xs flex items-center gap-1">
+                        📱 แชร์มือถือ
+                    </button>
+                </div>
+
+                <!-- Global Action Buttons (Desktop) -->
+                <div class="hidden md:flex flex-wrap items-center gap-2">
+                    <button id="share-btn-desktop" onclick="openShareModal()" class="px-3 py-1.5 text-xs font-bold rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 shadow-xs flex items-center gap-1.5 transition-all">
+                        📱 แชร์ QR Code สู่มือถือ
+                    </button>
+                    <button id="sync-market-btn" class="px-3 py-1.5 text-xs font-bold rounded-lg bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 shadow-xs flex items-center gap-1.5 transition-all">
+                        🔄 อัปเดตราคา 7 วัน
+                    </button>
+                    <button id="print-btn" class="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs flex items-center gap-1.5 transition-all">
+                        🖨️ พิมพ์ใบครัว
+                    </button>
+                    <button id="save-btn" class="px-3 py-1.5 text-xs font-bold rounded-lg bg-slate-900 hover:bg-black text-white shadow-xs flex items-center gap-1.5 transition-all">
+                        💾 บันทึก
+                    </button>
+                    <button id="export-btn" class="px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 transition-all">
+                        📥 Export
+                    </button>
+                    <button id="reset-btn" class="px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-slate-100 hover:bg-rose-50 hover:text-rose-600 text-slate-600 border border-slate-200 transition-all">
+                        ⏪ รีเซ็ต
+                    </button>
+                </div>
+            </div>
+
+            <!-- KPI Dashboard Bar -->
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 md:gap-3 py-2.5 border-t border-slate-100 text-xs">
+                <div class="bg-slate-50 rounded-xl p-2.5 border border-slate-200/70">
+                    <span class="text-slate-500 block text-[10px] md:text-[11px]">จำนวนเมนูทั้งหมด</span>
+                    <strong id="kpi-total-dishes" class="text-sm md:text-base font-black text-slate-800">112</strong>
+                    <span class="text-slate-400 text-[10px] ml-1">เมนู</span>
+                </div>
+                <div class="bg-slate-50 rounded-xl p-2.5 border border-slate-200/70">
+                    <span class="text-slate-500 block text-[10px] md:text-[11px]">ผ่านเกณฑ์ &le; 40%</span>
+                    <strong id="kpi-compliant-pct" class="text-sm md:text-base font-black text-emerald-600">100%</strong>
+                </div>
+                <div class="bg-slate-50 rounded-xl p-2.5 border border-slate-200/70">
+                    <span class="text-slate-500 block text-[10px] md:text-[11px]">Food Cost รวมเฉลี่ย</span>
+                    <strong id="kpi-avg-cost" class="text-sm md:text-base font-black text-blue-600">36.4%</strong>
+                </div>
+                <div class="bg-slate-50 rounded-xl p-2.5 border border-slate-200/70">
+                    <span class="text-slate-500 block text-[10px] md:text-[11px]">กำไรขั้นต้น (GP)</span>
+                    <strong id="kpi-avg-margin" class="text-sm md:text-base font-black text-emerald-700">63.6%</strong>
+                </div>
+            </div>
+
+            <!-- Navigation Tabs (Desktop) -->
+            <div class="hidden md:flex space-x-1 border-t border-slate-200 overflow-x-auto">
+                <button data-tab="prep-board" class="nav-tab active px-4 py-2.5 text-xs font-bold border-b-2 border-blue-600 text-blue-600 bg-blue-50/50 whitespace-nowrap transition-all">
+                    📋 กระดานสเปกวัตถุดิบครัว (Kitchen Board)
+                </button>
+                <button data-tab="cost-analysis" class="nav-tab px-4 py-2.5 text-xs font-bold border-b-2 border-transparent text-slate-600 hover:text-slate-900 whitespace-nowrap transition-all">
+                    📊 วิเคราะห์โครงสร้างต้นทุน (Cost & Profit Margin)
+                </button>
+                <button data-tab="market-prices" class="nav-tab px-4 py-2.5 text-xs font-bold border-b-2 border-transparent text-slate-600 hover:text-slate-900 whitespace-nowrap transition-all">
+                    🏷️ ฐานข้อมูลราคาตลาด 7 วัน & ปรับต้นทุน (Market Prices)
+                </button>
+                <button data-tab="ref-gallery" class="nav-tab px-4 py-2.5 text-xs font-bold border-b-2 border-transparent text-slate-600 hover:text-slate-900 whitespace-nowrap transition-all">
+                    🖼️ แกลเลอรีเมนูอ้างอิง 19 รูป (Menu Gallery)
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Search & Category Filters Bar -->
+    <div class="bg-white border-b border-slate-200 py-2.5 shadow-xs print:hidden">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex flex-col md:flex-row gap-2.5 items-stretch md:items-center justify-between">
+                <!-- Search Box -->
+                <div class="relative w-full md:w-80">
+                    <input type="text" id="search-input" placeholder="🔍 ค้นหาเมนู หรือวัตถุดิบ..." 
+                        class="w-full text-xs py-2 pl-3 pr-8 rounded-xl border border-slate-300 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-slate-50" />
+                </div>
+
+                <!-- Category Filters Scrollable -->
+                <div id="category-pills" class="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0 scrollbar-thin">
+                    <!-- Dynamic Category Pills Rendered by app.js -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Print Only Header -->
+    <div class="hidden print-header p-4 border-b-2 border-slate-800 text-center mb-4">
+        <h1 class="text-2xl font-black">ครัวแสนสุข - กระดานสเปกวัตถุดิบสำหรับครัว (Kitchen Prep Board)</h1>
+        <p class="text-xs text-slate-600 mt-1">
+            มาตรฐานชั่ง/ตวง/นับชิ้น (Portion Control Spec) | ควบคุมต้นทุนรวมไม่เกิน 40% กำไรขั้นต้น &ge; 60%
+        </p>
+    </div>
+
+    <!-- Main Content Area -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5 flex-1 w-full">
+        <div id="main-content">
+            <!-- Dynamic Tab Content Rendered by app.js -->
+        </div>
+    </main>
+
+    <!-- Mobile Bottom Navigation Bar (Sticky for Phones) -->
+    <nav class="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-slate-200 px-2 py-2 flex items-center justify-around shadow-lg pb-safe print:hidden">
+        <button data-tab="prep-board" class="mobile-nav-btn flex flex-col items-center gap-0.5 text-blue-600 font-bold">
+            <span class="text-xl">📋</span>
+            <span class="text-[10px]">สเปกครัว</span>
+        </button>
+        <button data-tab="cost-analysis" class="mobile-nav-btn flex flex-col items-center gap-0.5 text-slate-400">
+            <span class="text-xl">📊</span>
+            <span class="text-[10px]">ต้นทุน</span>
+        </button>
+        <button data-tab="market-prices" class="mobile-nav-btn flex flex-col items-center gap-0.5 text-slate-400">
+            <span class="text-xl">🏷️</span>
+            <span class="text-[10px]">ราคาตลาด</span>
+        </button>
+        <button data-tab="ref-gallery" class="mobile-nav-btn flex flex-col items-center gap-0.5 text-slate-400">
+            <span class="text-xl">🖼️</span>
+            <span class="text-[10px]">รูป 19 แผ่น</span>
+        </button>
+        <button onclick="openShareModal()" class="flex flex-col items-center gap-0.5 text-slate-400">
+            <span class="text-xl">📱</span>
+            <span class="text-[10px]">แชร์สด</span>
+        </button>
+    </nav>
+
+    <!-- Desktop Footer -->
+    <footer class="hidden md:block bg-white border-t border-slate-200 py-4 text-center text-xs text-slate-500 print:hidden mt-auto">
+        <div class="max-w-7xl mx-auto px-4">
+            <p>
+                <strong>ครัวแสนสุข</strong> • โทร 080-143-2563 • ฐานข้อมูลราคาตลาดสดอัปเดตรอบ 7 วัน: <span id="last-sync-date">2026-10-10</span>
+            </p>
+            <p class="text-[11px] text-slate-400 mt-0.5">
+                รองรับการทำงานพร้อมกันหลายเครื่องแบบเรียลไทม์ (Live WebSocket Sync)
+            </p>
+        </div>
+    </footer>
+
+    <!-- Toast Notification Container -->
+    <div id="toast" class="fixed bottom-20 md:bottom-5 right-4 md:right-5 z-50 px-4 py-3 rounded-xl shadow-2xl text-white text-xs md:text-sm font-semibold transition-all duration-300 opacity-0 pointer-events-none">
+        การแจ้งเตือน
+    </div>
+
+    <!-- Scripts -->
+    <script src="default_data.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
