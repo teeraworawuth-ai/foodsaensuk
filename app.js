@@ -7,7 +7,47 @@ let appData = null;
 let currentTab = 'prep-board';
 let currentCategory = 'all';
 let searchQuery = '';
-let viewMode = 'cards'; // 'cards' | 'table'
+let viewMode = 'wall-sheet'; // 'wall-sheet' | 'cards' | 'table'
+let selectedDishIds = new Set();
+
+// Station classification helper
+function getDishStation(dish) {
+    const cat = dish.category || '';
+    if (cat === 'cat_stir_fry' || cat === 'cat_fried_rice' || cat === 'cat_alacarte') {
+        return { id: 'wok', name: 'เตาผัด', icon: '🔥', color: 'text-amber-800 bg-amber-50 border-amber-300' };
+    }
+    if (cat === 'cat_soup') {
+        return { id: 'soup', name: 'เตาต้ม/แกง', icon: '🍲', color: 'text-sky-800 bg-sky-50 border-sky-300' };
+    }
+    if (cat === 'cat_bbq' || cat === 'cat_fried' || cat === 'cat_seabass') {
+        return { id: 'grill', name: 'เตาย่าง/ทอด', icon: '🦐', color: 'text-rose-800 bg-rose-50 border-rose-300' };
+    }
+    if (cat === 'cat_fresh_yum' || cat === 'cat_thai_yum') {
+        return { id: 'salad', name: 'สเตชันยำ', icon: '🥗', color: 'text-emerald-800 bg-emerald-50 border-emerald-300' };
+    }
+    if (cat === 'cat_omelet') {
+        return { id: 'omelet', name: 'เตาไข่', icon: '🍳', color: 'text-yellow-800 bg-yellow-50 border-yellow-300' };
+    }
+    return { id: 'general', name: 'ครัวหลัก', icon: '🍽️', color: 'text-slate-800 bg-slate-100 border-slate-300' };
+}
+
+// Protein color indicator helper for visual glance
+function getProteinColorInfo(itemName) {
+    const n = (itemName || '').toLowerCase();
+    if (n.includes('กุ้ง') || n.includes('ปู')) {
+        return { border: 'border-l-rose-500', badge: 'bg-rose-50 text-rose-800 border-rose-200', dot: '🔴' };
+    }
+    if (n.includes('ปลา') || n.includes('หมึก') || n.includes('หอย') || n.includes('กะพง') || n.includes('คัง') || n.includes('ทะเล')) {
+        return { border: 'border-l-blue-500', badge: 'bg-blue-50 text-blue-800 border-blue-200', dot: '🔵' };
+    }
+    if (n.includes('หมู') || n.includes('ไก่') || n.includes('เนื้อ')) {
+        return { border: 'border-l-emerald-600', badge: 'bg-emerald-50 text-emerald-800 border-emerald-200', dot: '🟢' };
+    }
+    if (n.includes('ไข่') || n.includes('เต้าหู้')) {
+        return { border: 'border-l-amber-500', badge: 'bg-amber-50 text-amber-800 border-amber-200', dot: '🟡' };
+    }
+    return { border: 'border-l-slate-400', badge: 'bg-slate-50 text-slate-700 border-slate-200', dot: '⚪' };
+}
 
 // Real-Time Multi-Device Sync Configuration
 let mqttClient = null;
@@ -97,14 +137,15 @@ function initRealtimeSync() {
         });
 
         const topic = `saensuk/kitchen/v2/${syncRoomCode}`;
+        const deltaTopic = `saensuk/kitchen/v2/${syncRoomCode}/retained_delta`;
 
         mqttClient.on('connect', () => {
-            console.log('Connected to Realtime Live Sync:', brokerUrl);
+            console.log('Connected to Cloud Realtime Live Sync:', brokerUrl);
             updateSyncStatus('online');
 
+            // Subscribe to live broadcast events
             mqttClient.subscribe(topic, (err) => {
                 if (!err) {
-                    // Send discovery ping to see if any peers have newer state
                     broadcastMessage({
                         type: 'PEER_PING',
                         senderId: deviceId,
@@ -112,11 +153,22 @@ function initRealtimeSync() {
                     });
                 }
             });
+
+            // Subscribe to 24/7 cloud retained state (saved in cloud even when all PCs/phones were off)
+            mqttClient.subscribe(deltaTopic, (err) => {
+                if (!err) {
+                    console.log('Subscribed to Cloud 24/7 Retained State');
+                }
+            });
         });
 
         mqttClient.on('message', (receivedTopic, message) => {
             try {
                 const payload = JSON.parse(message.toString());
+                if (receivedTopic.endsWith('/retained_delta')) {
+                    applyCloudDelta(payload);
+                    return;
+                }
                 handleIncomingSyncMessage(payload);
             } catch (err) {
                 console.error('Error handling sync message:', err);
@@ -146,6 +198,114 @@ function broadcastMessage(payload) {
     payload.timestamp = Date.now();
     const topic = `saensuk/kitchen/v2/${syncRoomCode}`;
     mqttClient.publish(topic, JSON.stringify(payload), { qos: 0 });
+}
+
+// Compile customized data into a compact cloud delta
+function getCloudDelta() {
+    if (!appData) return null;
+    const customPrices = {};
+    Object.values(appData.raw_materials || {}).forEach(rm => {
+        if (rm.use_custom && rm.custom_price !== undefined) {
+            customPrices[rm.id] = {
+                use_custom: true,
+                custom_price: rm.custom_price,
+                custom_price_display: rm.custom_price_display
+            };
+        }
+    });
+
+    const modifiedDishes = {};
+    (appData.dishes || []).forEach(dish => {
+        if (dish.is_customized) {
+            modifiedDishes[dish.id] = {
+                items: dish.items,
+                price: dish.price
+            };
+        }
+    });
+
+    return {
+        type: 'RETAINED_DELTA_STATE',
+        room: syncRoomCode,
+        senderId: deviceId,
+        updatedAt: Date.now(),
+        last_sync: appData.restaurant_info.last_market_sync,
+        customPrices,
+        modifiedDishes
+    };
+}
+
+// Publish retained delta to cloud broker (retained in cloud 24/7)
+function publishCloudDelta() {
+    if (!mqttClient || !mqttClient.connected) return;
+    const delta = getCloudDelta();
+    if (!delta) return;
+    const deltaTopic = `saensuk/kitchen/v2/${syncRoomCode}/retained_delta`;
+    mqttClient.publish(deltaTopic, JSON.stringify(delta), { qos: 1, retain: true });
+    console.log('Saved state to 24/7 Cloud Broker');
+}
+
+// Apply retained delta from cloud broker
+function applyCloudDelta(delta) {
+    if (!delta || !appData || delta.senderId === deviceId) return;
+    let changed = false;
+
+    if (delta.customPrices) {
+        Object.entries(delta.customPrices).forEach(([rmId, cData]) => {
+            const rm = appData.raw_materials[rmId];
+            if (rm) {
+                rm.use_custom = true;
+                rm.custom_price = cData.custom_price;
+                rm.custom_price_display = cData.custom_price_display;
+                changed = true;
+            }
+        });
+    }
+
+    if (delta.modifiedDishes) {
+        Object.entries(delta.modifiedDishes).forEach(([dishId, dData]) => {
+            const dish = appData.dishes.find(d => d.id === dishId);
+            if (dish) {
+                if (dData.items) dish.items = dData.items;
+                if (dData.price) dish.price = dData.price;
+                dish.is_customized = true;
+                changed = true;
+            }
+        });
+    }
+
+    if (delta.last_sync && delta.last_sync > (appData.restaurant_info.last_market_sync || '')) {
+        appData.restaurant_info.last_market_sync = delta.last_sync;
+        changed = true;
+    }
+
+    if (changed) {
+        recalculateAllDishes();
+        saveData(true);
+        renderAll();
+        showToast('☁️ ซิงค์ข้อมูลล่าสุดจาก Cloud Server สำเร็จแล้ว (24 ชม.)', 'info');
+    }
+}
+
+// Update Sync Status Badge on UI
+function updateSyncStatus(status) {
+    const el = document.getElementById('live-sync-indicator');
+    const textEl = document.getElementById('live-sync-text');
+    if (!el || !textEl) return;
+
+    if (status === 'online') {
+        el.className = 'w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse';
+        textEl.textContent = '🟢 คลาวด์ออนไลน์ 24 ชม. (Live Sync)';
+        textEl.className = 'text-[11px] font-bold text-emerald-700';
+    } else if (status === 'connecting') {
+        el.className = 'w-2.5 h-2.5 rounded-full bg-amber-500 animate-ping';
+        textEl.textContent = '🟡 กำลังเชื่อมต่อคลาวด์ 24 ชม...';
+        textEl.className = 'text-[11px] font-medium text-amber-700';
+    } else {
+        el.className = 'w-2.5 h-2.5 rounded-full bg-slate-400';
+        textEl.textContent = '⚪ ออฟไลน์ (แคชในเครื่องพร้อมใช้)';
+        textEl.className = 'text-[11px] font-medium text-slate-500';
+    }
 }
 
 // Handle messages from other devices
@@ -221,27 +381,6 @@ function handleIncomingSyncMessage(data) {
         renderAll();
         showToast('⚠️ ข้อมูลถูกรีเซ็ตกลับสู่ค่าเริ่มต้นโดยเครื่องทีมงาน', 'warning');
         return;
-    }
-}
-
-// Update Sync Status Badge on UI
-function updateSyncStatus(status) {
-    const el = document.getElementById('live-sync-indicator');
-    const textEl = document.getElementById('live-sync-text');
-    if (!el || !textEl) return;
-
-    if (status === 'online') {
-        el.className = 'w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse';
-        textEl.textContent = 'ออนไลน์เรียลไทม์ (Live Sync)';
-        textEl.className = 'text-[11px] font-bold text-emerald-700';
-    } else if (status === 'connecting') {
-        el.className = 'w-2.5 h-2.5 rounded-full bg-amber-500 animate-ping';
-        textEl.textContent = 'กำลังเชื่อมต่อทีม...';
-        textEl.className = 'text-[11px] font-medium text-amber-700';
-    } else {
-        el.className = 'w-2.5 h-2.5 rounded-full bg-slate-400';
-        textEl.textContent = 'ออฟไลน์ (บันทึกในเครื่อง)';
-        textEl.className = 'text-[11px] font-medium text-slate-500';
     }
 }
 
@@ -344,7 +483,11 @@ function setupEventListeners() {
     const printBtn = document.getElementById('print-btn');
     if (printBtn) {
         printBtn.addEventListener('click', () => {
-            window.print();
+            if (selectedDishIds && selectedDishIds.size > 0) {
+                printSelectedBatch();
+            } else {
+                printAllDishes();
+            }
         });
     }
 
@@ -556,33 +699,207 @@ function renderAll() {
 // -------------------------------------------------------------------------
 // TAB 1: Kitchen Prep Board (กระดานสเปกวัตถุดิบสำหรับครัว)
 // -------------------------------------------------------------------------
+// Selection & Batch Printing Handlers
+window.toggleDishSelection = function(dishId, event) {
+    if (event) event.stopPropagation();
+    if (selectedDishIds.has(dishId)) {
+        selectedDishIds.delete(dishId);
+    } else {
+        selectedDishIds.add(dishId);
+    }
+    updateSelectionUI();
+};
+
+window.selectAllDishes = function() {
+    const dishes = getFilteredDishes();
+    dishes.forEach(d => selectedDishIds.add(d.id));
+    updateSelectionUI();
+    showToast(`เลือกทั้งหมด ${selectedDishIds.size} เมนูสำหรับการพิมพ์แล้ว`);
+};
+
+window.deselectAllDishes = function() {
+    selectedDishIds.clear();
+    updateSelectionUI();
+    showToast('ล้างการเลือกเมนูทั้งหมดแล้ว', 'info');
+};
+
+window.selectStationDishes = function(stationId, stationName) {
+    selectedDishIds.clear();
+    if (!appData || !appData.dishes) return;
+    appData.dishes.forEach(dish => {
+        const station = getDishStation(dish);
+        if (station.id === stationId) {
+            selectedDishIds.add(dish.id);
+        }
+    });
+    updateSelectionUI();
+    showToast(`เลือกเมนู "${stationName}" (${selectedDishIds.size} เมนู) พร้อมสั่งพิมพ์แล้ว!`);
+};
+
+function updateSelectionUI() {
+    const count = selectedDishIds.size;
+    document.querySelectorAll('.selected-count-badge').forEach(el => {
+        el.textContent = count;
+    });
+
+    document.querySelectorAll('.print-selected-btn').forEach(btn => {
+        if (count > 0) {
+            btn.innerHTML = `🖨️ พิมพ์เฉพาะที่เลือก (${count} เมนู)`;
+            btn.classList.remove('opacity-60', 'pointer-events-none');
+        } else {
+            btn.innerHTML = `🖨️ พิมพ์เฉพาะที่เลือก (0)`;
+            btn.classList.add('opacity-60');
+        }
+    });
+
+    document.querySelectorAll('.dish-checkbox').forEach(cb => {
+        const dishId = cb.dataset.dishId;
+        const isChecked = selectedDishIds.has(dishId);
+        cb.checked = isChecked;
+        const card = cb.closest('.dish-item');
+        if (card) {
+            card.classList.toggle('is-selected-for-print', isChecked);
+            card.classList.toggle('ring-2', isChecked);
+            card.classList.toggle('ring-blue-500', isChecked);
+            card.classList.toggle('bg-blue-50/20', isChecked);
+        }
+    });
+}
+
+window.printSelectedBatch = function() {
+    if (selectedDishIds.size === 0) {
+        if (confirm('คุณยังไม่ได้เลือกเมนูใดๆ ต้องการเลือกเมนูทั้งหมดที่แสดงอยู่ตอนนี้เพื่อพิมพ์ใช่หรือไม่?')) {
+            selectAllDishes();
+        } else {
+            return;
+        }
+    }
+
+    const badge = document.getElementById('print-batch-badge');
+    if (badge) {
+        badge.textContent = `ชุดพิมพ์เฉพาะที่เลือก (${selectedDishIds.size} เมนู)`;
+    }
+    const dateEl = document.getElementById('print-current-date');
+    if (dateEl) {
+        dateEl.textContent = new Date().toLocaleDateString('th-TH', { 
+            year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' 
+        });
+    }
+
+    const mainContent = document.getElementById('main-content');
+    if (mainContent) {
+        mainContent.classList.add('printing-selected-only');
+    }
+
+    window.print();
+
+    setTimeout(() => {
+        if (mainContent) {
+            mainContent.classList.remove('printing-selected-only');
+        }
+    }, 1500);
+};
+
+window.printAllDishes = function() {
+    const badge = document.getElementById('print-batch-badge');
+    if (badge) {
+        badge.textContent = `ชุดพิมพ์: ทั้งหมด (${appData ? appData.dishes.length : 0} เมนู)`;
+    }
+    const dateEl = document.getElementById('print-current-date');
+    if (dateEl) {
+        dateEl.textContent = new Date().toLocaleDateString('th-TH', { 
+            year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' 
+        });
+    }
+    const mainContent = document.getElementById('main-content');
+    if (mainContent) {
+        mainContent.classList.remove('printing-selected-only');
+    }
+    window.print();
+};
+
 function renderKitchenPrepBoard(container) {
     const dishes = getFilteredDishes();
 
+    const wokCount = appData.dishes.filter(d => getDishStation(d).id === 'wok').length;
+    const soupCount = appData.dishes.filter(d => getDishStation(d).id === 'soup').length;
+    const grillCount = appData.dishes.filter(d => getDishStation(d).id === 'grill').length;
+    const saladCount = appData.dishes.filter(d => getDishStation(d).id === 'salad').length;
+    const omeletCount = appData.dishes.filter(d => getDishStation(d).id === 'omelet').length;
+
     const topControls = `
-        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-5 print:hidden">
+        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4 print:hidden">
             <div>
                 <h2 class="text-lg md:text-xl font-bold text-slate-800 flex items-center gap-2">
                     📋 กระดานสเปกวัตถุดิบสำหรับครัว (Kitchen Prep Board)
                 </h2>
                 <p class="text-xs text-slate-500 mt-0.5">
-                    แสดงเฉพาะสิ่งที่คนครัวต้อง <strong>ชั่ง (กรัม) / ตวง (มล.) / นับชิ้น</strong> จำกัด 3-5 รายการ (ตัดเครื่องปรุงย่อย &lt;1%)
+                    แสดงเฉพาะสิ่งที่คนครัวต้อง <strong>ชั่ง (กรัม) / ตวง (มล.) / นับชิ้น</strong> • ติ๊กเลือกเมนูเพื่อสั่งพิมพ์เฉพาะชุดที่ต้องการได้
                 </p>
             </div>
-            <div class="flex flex-wrap items-center gap-2 w-full sm:w-auto">
-                <button onclick="setViewMode('cards')" class="flex-1 sm:flex-initial px-3 py-1.5 text-xs font-medium rounded-lg border transition-all ${
-                    viewMode === 'cards' ? 'bg-blue-600 text-white border-blue-600 shadow-xs' : 'bg-white text-slate-700 border-slate-200'
+            <div class="flex flex-wrap items-center gap-1.5 w-full sm:w-auto">
+                <button onclick="setViewMode('wall-sheet')" class="flex-1 sm:flex-initial px-3 py-1.5 text-xs font-bold rounded-lg border transition-all ${
+                    viewMode === 'wall-sheet' ? 'bg-blue-600 text-white border-blue-600 shadow-xs' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                }">
+                    📌 ป้ายย่อติดผนัง (Wall Sheet)
+                </button>
+                <button onclick="setViewMode('cards')" class="flex-1 sm:flex-initial px-3 py-1.5 text-xs font-bold rounded-lg border transition-all ${
+                    viewMode === 'cards' ? 'bg-blue-600 text-white border-blue-600 shadow-xs' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
                 }">
                     🗂️ การ์ดครัว
                 </button>
-                <button onclick="setViewMode('table')" class="flex-1 sm:flex-initial px-3 py-1.5 text-xs font-medium rounded-lg border transition-all ${
-                    viewMode === 'table' ? 'bg-blue-600 text-white border-blue-600 shadow-xs' : 'bg-white text-slate-700 border-slate-200'
+                <button onclick="setViewMode('table')" class="flex-1 sm:flex-initial px-3 py-1.5 text-xs font-bold rounded-lg border transition-all ${
+                    viewMode === 'table' ? 'bg-blue-600 text-white border-blue-600 shadow-xs' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
                 }">
                     📑 ตารางรวม
                 </button>
-                <button onclick="window.print()" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs flex items-center justify-center gap-1.5">
-                    🖨️ พิมพ์ใบครัว
-                </button>
+            </div>
+        </div>
+
+        <!-- Custom Batch Selection Toolbar -->
+        <div id="batch-toolbar" class="bg-white rounded-2xl border border-slate-200 p-3 mb-4 shadow-xs print:hidden">
+            <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                <!-- Station selection buttons -->
+                <div class="flex flex-wrap items-center gap-1.5 text-xs">
+                    <span class="font-bold text-slate-700 mr-1 flex items-center gap-1">
+                        🏷️ ทางลัดเลือกตามเตา:
+                    </span>
+                    <button onclick="selectStationDishes('wok', 'เตาผัด')" class="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 font-semibold transition-all">
+                        🔥 เตาผัด (${wokCount})
+                    </button>
+                    <button onclick="selectStationDishes('soup', 'เตาต้ม/แกง')" class="px-2.5 py-1 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 font-semibold transition-all">
+                        🍲 เตาต้ม/แกง (${soupCount})
+                    </button>
+                    <button onclick="selectStationDishes('grill', 'เตาย่าง/ทอด')" class="px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200 font-semibold transition-all">
+                        🦐 เตาเผา/ย่าง/ทอด (${grillCount})
+                    </button>
+                    <button onclick="selectStationDishes('salad', 'สเตชันยำ')" class="px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 font-semibold transition-all">
+                        🥗 สเตชันยำ (${saladCount})
+                    </button>
+                    <button onclick="selectStationDishes('omelet', 'เตาไข่')" class="px-2.5 py-1 rounded-lg bg-yellow-50 hover:bg-yellow-100 text-yellow-800 border border-yellow-200 font-semibold transition-all">
+                        🍳 เตาไข่ (${omeletCount})
+                    </button>
+                    <span class="text-slate-300">|</span>
+                    <button onclick="selectAllDishes()" class="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium">
+                        ☑️ ทั้งหมด
+                    </button>
+                    <button onclick="deselectAllDishes()" class="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-600 font-medium">
+                        ⬜ ล้าง
+                    </button>
+                </div>
+
+                <!-- Action / Print button -->
+                <div class="flex items-center gap-2 self-end lg:self-auto">
+                    <span class="text-xs font-bold px-2.5 py-1.5 rounded-lg bg-blue-50 text-blue-800 border border-blue-200 whitespace-nowrap">
+                        เลือกแล้ว: <strong class="selected-count-badge font-black text-blue-900">${selectedDishIds.size}</strong> เมนู
+                    </span>
+                    <button onclick="printSelectedBatch()" class="print-selected-btn px-3.5 py-1.5 text-xs font-bold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm flex items-center gap-1.5 transition-all whitespace-nowrap ${selectedDishIds.size === 0 ? 'opacity-60' : ''}">
+                        🖨️ พิมพ์เฉพาะที่เลือก (<span class="selected-count-badge">${selectedDishIds.size}</span>)
+                    </button>
+                    <button onclick="printAllDishes()" class="px-2.5 py-1.5 text-xs font-semibold rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 transition-all whitespace-nowrap">
+                        พิมพ์ทั้งหมด
+                    </button>
+                </div>
             </div>
         </div>
     `;
@@ -596,19 +913,89 @@ function renderKitchenPrepBoard(container) {
         return;
     }
 
-    if (viewMode === 'cards') {
+    if (viewMode === 'wall-sheet') {
+        // High Density Compact Wall Sheet Mode (3-Columns Grid for Wall Mounting)
+        let wallHtml = '<div class="wall-grid grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5">';
+        dishes.forEach((dish) => {
+            const station = getDishStation(dish);
+            const isSel = selectedDishIds.has(dish.id);
+
+            wallHtml += `
+                <div class="dish-item wall-card bg-white rounded-xl border border-slate-200 p-2.5 shadow-xs flex flex-col justify-between transition-all hover:border-blue-400 break-inside-avoid ${isSel ? 'is-selected-for-print ring-2 ring-blue-500 bg-blue-50/20' : ''}" data-dish-id="${dish.id}">
+                    <div>
+                        <!-- Header of Wall Card -->
+                        <div class="flex items-center justify-between gap-1.5 border-b border-slate-100 pb-1.5 mb-1.5">
+                            <div class="flex items-center gap-2 min-w-0">
+                                <label class="cursor-pointer inline-flex items-center no-print" onclick="event.stopPropagation()">
+                                    <input type="checkbox" data-dish-id="${dish.id}" onchange="toggleDishSelection('${dish.id}', event)" class="dish-checkbox w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer" ${isSel ? 'checked' : ''}>
+                                </label>
+                                <h4 class="font-black text-slate-900 text-xs md:text-sm truncate">
+                                    ${dish.name}
+                                </h4>
+                            </div>
+                            <div class="flex items-center gap-1 shrink-0">
+                                <span class="text-[10px] font-bold px-1.5 py-0.5 rounded border ${station.color}">
+                                    ${station.icon} ${station.name}
+                                </span>
+                                <span class="text-xs font-black text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
+                                    ${dish.price}.-
+                                </span>
+                            </div>
+                        </div>
+
+                        <!-- Ingredients List with LARGE BOLD Numbers -->
+                        <div class="space-y-1">
+                            ${dish.items.map(item => {
+                                const pInfo = getProteinColorInfo(item.rm_name);
+                                const actionIcon = item.action === 'ชั่งน้ำหนัก' ? '⚖️' : item.action === 'นับชิ้น' ? '🔢' : '🧪';
+                                return `
+                                    <div class="flex items-center justify-between text-[11px] p-1 rounded bg-slate-50 border border-slate-100 border-l-2 ${pInfo.border}">
+                                        <span class="truncate font-semibold text-slate-800 pr-1">
+                                            ${item.rm_name}
+                                            ${item.type === 'primary' ? '<span class="text-[9px] text-rose-600 font-bold ml-0.5">(หลัก)</span>' : ''}
+                                        </span>
+                                        <span class="font-black text-blue-900 shrink-0 text-xs bg-white px-1.5 py-0.2 rounded border border-slate-200">
+                                            ${actionIcon} ${item.portion} <strong class="text-[10px] font-normal text-slate-600">${item.unit}</strong>
+                                        </span>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+
+                    <!-- Footer with Cost Summary & Quick Edit -->
+                    <div class="mt-2 pt-1 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-500">
+                        <span>ต้นทุน: <strong class="text-slate-700">${dish.primary_secondary_cost}.-</strong> (${dish.total_cost_pct}%)</span>
+                        <button onclick="openDishEditor('${dish.id}')" class="text-blue-600 hover:text-blue-800 font-bold no-print">
+                            ✏️ ปรับสเปก
+                        </button>
+                    </div>
+                </div>
+            `;
+        });
+        wallHtml += '</div>';
+        container.innerHTML = topControls + wallHtml;
+    } else if (viewMode === 'cards') {
+        // Detailed Card View
         let cardsHtml = '<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 md:gap-5 print:grid-cols-2">';
         dishes.forEach((dish) => {
             const catObj = appData.categories.find(c => c.id === dish.category);
             const catName = catObj ? catObj.name.split('(')[0] : '';
+            const station = getDishStation(dish);
+            const isSel = selectedDishIds.has(dish.id);
 
             cardsHtml += `
-                <div class="bg-white rounded-2xl border border-slate-200 shadow-xs hover:shadow-md transition-all overflow-hidden flex flex-col justify-between print:border-slate-400 print:shadow-none print:break-inside-avoid">
+                <div class="dish-item bg-white rounded-2xl border border-slate-200 shadow-xs hover:shadow-md transition-all overflow-hidden flex flex-col justify-between print:border-slate-400 print:shadow-none print:break-inside-avoid ${isSel ? 'is-selected-for-print ring-2 ring-blue-500 bg-blue-50/20' : ''}" data-dish-id="${dish.id}">
                     <div class="p-4 border-b border-slate-100 bg-slate-50/70">
                         <div class="flex items-center justify-between gap-2">
-                            <span class="text-[11px] font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-800 uppercase tracking-wider">
-                                ${catName} | รูปที่ ${dish.image_ref}
-                            </span>
+                            <div class="flex items-center gap-2">
+                                <label class="cursor-pointer inline-flex items-center no-print" onclick="event.stopPropagation()">
+                                    <input type="checkbox" data-dish-id="${dish.id}" onchange="toggleDishSelection('${dish.id}', event)" class="dish-checkbox w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer" ${isSel ? 'checked' : ''}>
+                                </label>
+                                <span class="text-[11px] font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-800 uppercase tracking-wider">
+                                    ${catName} | รูปที่ ${dish.image_ref}
+                                </span>
+                            </div>
                             <span class="text-base font-black text-emerald-700">
                                 ${dish.price.toLocaleString()}.-
                             </span>
@@ -621,7 +1008,7 @@ function renderKitchenPrepBoard(container) {
                     <div class="p-4 flex-1">
                         <div class="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-2.5 flex items-center justify-between">
                             <span>สเปกวัตถุดิบ (ชั่ง/ตวง/นับ)</span>
-                            <button onclick="openDishEditor('${dish.id}')" class="text-blue-600 hover:text-blue-800 font-bold text-xs">
+                            <button onclick="openDishEditor('${dish.id}')" class="text-blue-600 hover:text-blue-800 font-bold text-xs no-print">
                                 ✏️ ปรับสเปก
                             </button>
                         </div>
@@ -673,12 +1060,13 @@ function renderKitchenPrepBoard(container) {
         cardsHtml += '</div>';
         container.innerHTML = topControls + cardsHtml;
     } else {
-        // Table View
+        // Table View with Checkboxes
         let tableHtml = `
             <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-x-auto print:border-none print:shadow-none">
                 <table class="w-full text-left text-xs text-slate-600 border-collapse">
                     <thead class="bg-slate-100 text-slate-700 uppercase font-bold text-[11px] border-b border-slate-200">
                         <tr>
+                            <th class="p-3 w-8 text-center no-print">เลือก</th>
                             <th class="p-3">เมนู</th>
                             <th class="p-3">ราคา</th>
                             <th class="p-3">สเปกวัตถุดิบครัว (ชั่ง/ตวง/นับ)</th>
@@ -691,8 +1079,12 @@ function renderKitchenPrepBoard(container) {
         `;
 
         dishes.forEach((dish) => {
+            const isSel = selectedDishIds.has(dish.id);
             tableHtml += `
-                <tr class="hover:bg-slate-50 transition-colors">
+                <tr class="dish-item hover:bg-slate-50 transition-colors ${isSel ? 'is-selected-for-print bg-blue-50/30' : ''}" data-dish-id="${dish.id}">
+                    <td class="p-3 text-center no-print">
+                        <input type="checkbox" data-dish-id="${dish.id}" onchange="toggleDishSelection('${dish.id}', event)" class="dish-checkbox w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer" ${isSel ? 'checked' : ''}>
+                    </td>
                     <td class="p-3 font-bold text-slate-800 text-sm whitespace-nowrap">
                         ${dish.name}
                     </td>
@@ -911,6 +1303,7 @@ window.saveDishEditor = function(dishId) {
         }
     });
 
+    dish.is_customized = true;
     closeDishEditor();
     recalculateAllDishes();
     saveData(true);
@@ -922,6 +1315,9 @@ window.saveDishEditor = function(dishId) {
         dishId: dish.id,
         updatedDish: dish
     });
+
+    // Save state to 24/7 cloud broker
+    publishCloudDelta();
 
     showToast(`อัปเดตสเปก "${dish.name}" และกระจายสู่เครื่องทีมงานเรียลไทม์แล้ว`);
 };
@@ -1042,6 +1438,9 @@ window.togglePriceMode = function(rmId, useCustom) {
         effectivePrice: rm.custom_price || rm.market_price
     });
 
+    // Save to 24/7 cloud broker
+    publishCloudDelta();
+
     showToast(`เปลี่ยนโหมดราคา "${rm.name}" เป็น ${useCustom ? 'ราคาตั้งเอง' : 'ราคาตลาดอัตโนมัติ'}`);
 };
 
@@ -1073,6 +1472,9 @@ window.updateCustomPrice = function(rmId, val) {
         customVal: num,
         effectivePrice: rm.custom_price
     });
+
+    // Save to 24/7 cloud broker
+    publishCloudDelta();
 
     showToast(`อัปเดตราคาตั้งเองสำหรับ "${rm.name}" เป็น ${num} บาทแล้ว`);
 };
