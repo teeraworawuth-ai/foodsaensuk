@@ -172,10 +172,25 @@
     <div class="bg-white border-b border-slate-200 py-2.5 shadow-xs print:hidden">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div class="flex flex-col md:flex-row gap-2.5 items-stretch md:items-center justify-between">
-                <!-- Search Box -->
-                <div class="relative w-full md:w-80">
-                    <input type="text" id="search-input" placeholder="🔍 ค้นหาเมนู หรือวัตถุดิบ..." 
-                        class="w-full text-xs py-2 pl-3 pr-8 rounded-xl border border-slate-300 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-slate-50" />
+                <!-- Search Box & Delivery Pricing Control -->
+                <div class="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+                    <div class="relative w-full sm:w-72">
+                        <input type="text" id="search-input" placeholder="🔍 ค้นหาเมนู หรือวัตถุดิบ..." 
+                            class="w-full text-xs py-2 pl-3 pr-8 rounded-xl border border-slate-300 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-slate-50" />
+                    </div>
+                    <!-- Grab / Lineman Delivery Markup Control Pill -->
+                    <div class="flex items-center gap-1.5 bg-emerald-50/90 border border-emerald-300/80 px-2.5 py-1.5 rounded-xl text-xs shrink-0 shadow-2xs">
+                        <label class="flex items-center gap-1 cursor-pointer font-bold text-emerald-900 select-none" title="คลิกเพื่อสลับแสดงราคาขาย Grab / Lineman">
+                            <input type="checkbox" id="delivery-mode-toggle" class="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 border-emerald-300" onchange="toggleDeliveryMode(this.checked)">
+                            <span>🛵 Grab / Lineman</span>
+                        </label>
+                        <span class="text-emerald-300">|</span>
+                        <div class="flex items-center gap-0.5" title="เปอร์เซ็นต์บวกเพิ่มจากราคาหน้าร้านเพื่อชดเชยค่า GP แพลตฟอร์ม">
+                            <span class="text-[11px] text-emerald-700 font-semibold">+</span>
+                            <input type="number" id="delivery-markup-input" value="30" min="0" max="100" class="w-10 text-center font-black py-0.5 px-0.5 border border-emerald-300 rounded bg-white text-xs text-emerald-900 focus:outline-none focus:ring-1 focus:ring-emerald-500" onchange="updateDeliveryMarkup(this.value)">
+                            <span class="text-[11px] font-bold text-emerald-800">%</span>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Category Filters Scrollable -->

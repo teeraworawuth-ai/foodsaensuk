@@ -9,6 +9,38 @@ let currentCategory = 'all';
 let searchQuery = '';
 let viewMode = 'wall-sheet'; // 'wall-sheet' | 'cards' | 'table'
 let selectedDishIds = new Set();
+let deliveryMarkupPct = 30; // default +30% for Grab / Lineman
+let showDeliveryPrices = false; // toggle delivery price view
+let currentEditingDish = null; // active in-memory dish being edited
+let currentEditingRawMaterials = {}; // map of { rmId: newDisplayPrice } for global sync
+
+// Helper to count how many dishes use a specific raw material
+function getRawMaterialUsageCount(rmId) {
+    if (!appData || !appData.dishes) return 0;
+    return appData.dishes.filter(d => d.items && d.items.some(i => i.rm_id === rmId)).length;
+}
+
+// Delivery Pricing Handlers
+window.toggleDeliveryMode = function(enabled) {
+    showDeliveryPrices = enabled;
+    localStorage.setItem('saensuk_show_delivery_prices', enabled);
+    const delToggle = document.getElementById('delivery-mode-toggle');
+    if (delToggle) delToggle.checked = enabled;
+    renderAll();
+};
+
+window.updateDeliveryMarkup = function(val) {
+    const num = parseFloat(val);
+    if (!isNaN(num) && num >= 0) {
+        deliveryMarkupPct = num;
+        localStorage.setItem('saensuk_delivery_markup_pct', num);
+        const delMarkup = document.getElementById('delivery-markup-input');
+        if (delMarkup) delMarkup.value = num;
+        recalculateAllDishes();
+        renderAll();
+        showToast(`ปรับอัตราเปอร์เซ็นต์บวกเพิ่ม Grab/Lineman เป็น +${num}% แล้ว`);
+    }
+};
 
 // Station classification helper
 function getDishStation(dish) {
@@ -72,11 +104,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 // Load data from LocalStorage or data.json
 async function loadData() {
+    const savedMarkup = localStorage.getItem('saensuk_delivery_markup_pct');
+    if (savedMarkup) deliveryMarkupPct = parseFloat(savedMarkup) || 30;
+    const savedShowDel = localStorage.getItem('saensuk_show_delivery_prices');
+    if (savedShowDel !== null) showDeliveryPrices = (savedShowDel === 'true');
+
     const saved = localStorage.getItem(`saensuk_food_cost_data_${syncRoomCode}`);
     if (saved) {
         try {
             appData = JSON.parse(saved);
             console.log('Loaded data from localStorage for room:', syncRoomCode);
+            recalculateAllDishes();
             return;
         } catch (e) {
             console.error('Error parsing saved data:', e);
@@ -88,6 +126,7 @@ async function loadData() {
         if (response.ok) {
             appData = await response.json();
             console.log('Loaded data from data.json');
+            recalculateAllDishes();
             return;
         }
     } catch (e) {
@@ -97,6 +136,7 @@ async function loadData() {
     // Fallback if data.json fetch fails
     if (window.DEFAULT_DATA) {
         appData = JSON.parse(JSON.stringify(window.DEFAULT_DATA));
+        recalculateAllDishes();
     }
 }
 
@@ -502,6 +542,12 @@ function setupEventListeners() {
     if (shareBtn) {
         shareBtn.addEventListener('click', openShareModal);
     }
+
+    // Delivery Controls Initial State
+    const delToggle = document.getElementById('delivery-mode-toggle');
+    if (delToggle) delToggle.checked = showDeliveryPrices;
+    const delMarkup = document.getElementById('delivery-markup-input');
+    if (delMarkup) delMarkup.value = deliveryMarkupPct;
 }
 
 // Recalculate costs for all dishes based on current raw material effective prices
@@ -511,6 +557,12 @@ function recalculateAllDishes() {
     appData.dishes.forEach(dish => {
         let psCost = 0;
         dish.items.forEach(item => {
+            // If item is toggled off (disabled), exclude from cost calculation
+            if (item.disabled) {
+                item.item_cost = 0;
+                item.cost_pct_of_sales = 0;
+                return;
+            }
             const rm = appData.raw_materials[item.rm_id];
             if (rm) {
                 const effectivePrice = (rm.use_custom && rm.custom_price !== undefined) 
@@ -520,6 +572,7 @@ function recalculateAllDishes() {
                 const itemCost = Math.round(effectivePrice * item.portion * 100) / 100;
                 item.unit_cost = effectivePrice;
                 item.item_cost = itemCost;
+                item.cost_pct_of_sales = Math.round((itemCost / (dish.price || 1)) * 1000) / 10;
                 psCost += itemCost;
             }
         });
@@ -533,6 +586,15 @@ function recalculateAllDishes() {
         dish.gross_profit = Math.round((dish.price - dish.total_cost) * 100) / 100;
         dish.gross_margin_pct = Math.round((dish.gross_profit / dish.price) * 1000) / 10;
         dish.is_target_compliant = (dish.total_cost_pct <= 40.0 && dish.gross_margin_pct >= 60.0);
+
+        // Delivery (Grab / Lineman) Pricing & Economics
+        const markup = dish.delivery_markup_pct || deliveryMarkupPct || 30;
+        dish.delivery_price = Math.round(dish.price * (1 + markup / 100));
+        // Delivery Platform Fee is typically 30% GP
+        const deliveryPlatformGP = 0.30;
+        dish.delivery_net_revenue = Math.round(dish.delivery_price * (1 - deliveryPlatformGP) * 100) / 100;
+        dish.delivery_gross_profit = Math.round((dish.delivery_net_revenue - dish.total_cost) * 100) / 100;
+        dish.delivery_gross_margin_pct = Math.round((dish.delivery_gross_profit / (dish.delivery_net_revenue || 1)) * 1000) / 10;
     });
 }
 
@@ -919,6 +981,7 @@ function renderKitchenPrepBoard(container) {
         dishes.forEach((dish) => {
             const station = getDishStation(dish);
             const isSel = selectedDishIds.has(dish.id);
+            const activeItems = (dish.items || []).filter(item => !item.disabled);
 
             wallHtml += `
                 <div class="dish-item wall-card bg-white rounded-xl border border-slate-200 p-2.5 shadow-xs flex flex-col justify-between transition-all hover:border-blue-400 break-inside-avoid ${isSel ? 'is-selected-for-print ring-2 ring-blue-500 bg-blue-50/20' : ''}" data-dish-id="${dish.id}">
@@ -937,15 +1000,20 @@ function renderKitchenPrepBoard(container) {
                                 <span class="text-[10px] font-bold px-1.5 py-0.5 rounded border ${station.color}">
                                     ${station.icon} ${station.name}
                                 </span>
-                                <span class="text-xs font-black text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
+                                <span class="text-xs font-black text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200" title="ราคาขายหน้าร้าน">
                                     ${dish.price}.-
                                 </span>
+                                ${showDeliveryPrices ? `
+                                    <span class="text-[11px] font-black text-teal-800 bg-teal-50 px-1.5 py-0.5 rounded border border-teal-300" title="ราคา Grab / Lineman (+${deliveryMarkupPct}%)">
+                                        🛵 ${dish.delivery_price}.-
+                                    </span>
+                                ` : ''}
                             </div>
                         </div>
 
-                        <!-- Ingredients List with LARGE BOLD Numbers -->
+                        <!-- Ingredients List with LARGE BOLD Numbers (Only Active Items) -->
                         <div class="space-y-1">
-                            ${dish.items.map(item => {
+                            ${activeItems.length > 0 ? activeItems.map(item => {
                                 const pInfo = getProteinColorInfo(item.rm_name);
                                 const actionIcon = item.action === 'ชั่งน้ำหนัก' ? '⚖️' : item.action === 'นับชิ้น' ? '🔢' : '🧪';
                                 return `
@@ -959,7 +1027,7 @@ function renderKitchenPrepBoard(container) {
                                         </span>
                                     </div>
                                 `;
-                            }).join('')}
+                            }).join('') : '<div class="text-[11px] text-slate-400 py-1 text-center font-medium">ไม่มีวัตถุดิบที่เปิดใช้งาน</div>'}
                         </div>
                     </div>
 
@@ -983,6 +1051,7 @@ function renderKitchenPrepBoard(container) {
             const catName = catObj ? catObj.name.split('(')[0] : '';
             const station = getDishStation(dish);
             const isSel = selectedDishIds.has(dish.id);
+            const activeItems = (dish.items || []).filter(item => !item.disabled);
 
             cardsHtml += `
                 <div class="dish-item bg-white rounded-2xl border border-slate-200 shadow-xs hover:shadow-md transition-all overflow-hidden flex flex-col justify-between print:border-slate-400 print:shadow-none print:break-inside-avoid ${isSel ? 'is-selected-for-print ring-2 ring-blue-500 bg-blue-50/20' : ''}" data-dish-id="${dish.id}">
@@ -996,9 +1065,14 @@ function renderKitchenPrepBoard(container) {
                                     ${catName} | รูปที่ ${dish.image_ref}
                                 </span>
                             </div>
-                            <span class="text-base font-black text-emerald-700">
-                                ${dish.price.toLocaleString()}.-
-                            </span>
+                            <div class="text-right">
+                                <span class="text-base font-black text-emerald-700" title="ราคาขายหน้าร้าน">
+                                    ${dish.price.toLocaleString()}.-
+                                </span>
+                                ${showDeliveryPrices ? `
+                                    <div class="text-[11px] font-black text-teal-700">🛵 Grab/LM: ${dish.delivery_price.toLocaleString()}.-</div>
+                                ` : ''}
+                            </div>
                         </div>
                         <h3 class="text-base md:text-lg font-bold text-slate-800 mt-1 leading-snug">
                             ${dish.name}
@@ -1014,7 +1088,7 @@ function renderKitchenPrepBoard(container) {
                         </div>
 
                         <div class="space-y-2">
-                            ${dish.items.map(item => {
+                            ${activeItems.length > 0 ? activeItems.map(item => {
                                 const actionBg = item.action === 'ชั่งน้ำหนัก' 
                                     ? 'bg-amber-50 text-amber-800 border-amber-200' 
                                     : item.action === 'นับชิ้น' 
@@ -1044,7 +1118,7 @@ function renderKitchenPrepBoard(container) {
                                         </div>
                                     </div>
                                 `;
-                            }).join('')}
+                            }).join('') : '<div class="text-xs text-slate-400 p-3 text-center bg-slate-50 rounded-xl">ไม่มีวัตถุดิบที่เปิดใช้งาน</div>'}
                         </div>
                     </div>
 
@@ -1068,7 +1142,8 @@ function renderKitchenPrepBoard(container) {
                         <tr>
                             <th class="p-3 w-8 text-center no-print">เลือก</th>
                             <th class="p-3">เมนู</th>
-                            <th class="p-3">ราคา</th>
+                            <th class="p-3">ราคาหน้าร้าน</th>
+                            ${showDeliveryPrices ? '<th class="p-3 text-right bg-emerald-50/50 text-emerald-900 border-l border-emerald-200 whitespace-nowrap">🛵 Grab / Lineman</th>' : ''}
                             <th class="p-3">สเปกวัตถุดิบครัว (ชั่ง/ตวง/นับ)</th>
                             <th class="p-3 text-right">ต้นทุนหลัก-รอง</th>
                             <th class="p-3 text-right">Food Cost %</th>
@@ -1080,6 +1155,7 @@ function renderKitchenPrepBoard(container) {
 
         dishes.forEach((dish) => {
             const isSel = selectedDishIds.has(dish.id);
+            const activeItems = (dish.items || []).filter(item => !item.disabled);
             tableHtml += `
                 <tr class="dish-item hover:bg-slate-50 transition-colors ${isSel ? 'is-selected-for-print bg-blue-50/30' : ''}" data-dish-id="${dish.id}">
                     <td class="p-3 text-center no-print">
@@ -1088,24 +1164,25 @@ function renderKitchenPrepBoard(container) {
                     <td class="p-3 font-bold text-slate-800 text-sm whitespace-nowrap">
                         ${dish.name}
                     </td>
-                    <td class="p-3 font-bold text-emerald-700">${dish.price}.-</td>
+                    <td class="p-3 font-bold text-emerald-700 whitespace-nowrap">${dish.price}.-</td>
+                    ${showDeliveryPrices ? `<td class="p-3 text-right font-black text-teal-800 bg-teal-50/30 border-l border-teal-200 whitespace-nowrap">${dish.delivery_price}.-</td>` : ''}
                     <td class="p-3">
                         <div class="flex flex-wrap gap-1.5">
-                            ${dish.items.map(item => `
+                            ${activeItems.length > 0 ? activeItems.map(item => `
                                 <div class="px-2 py-1 rounded-lg bg-slate-100 border border-slate-200 text-[11px] leading-tight">
                                     <strong class="text-slate-800">${item.rm_name}</strong>: 
                                     <span class="text-blue-700 font-bold">${item.portion} ${item.unit}</span>
                                     <span class="text-slate-500">(${item.action})</span>
                                 </div>
-                            `).join('')}
+                            `).join('') : '<span class="text-slate-400">ไม่มีวัตถุดิบที่เปิดใช้งาน</span>'}
                         </div>
                     </td>
                     <td class="p-3 text-right font-bold text-slate-700 whitespace-nowrap">${dish.primary_secondary_cost}.-</td>
                     <td class="p-3 text-right font-black whitespace-nowrap ${dish.total_cost_pct <= 40 ? 'text-emerald-600' : 'text-rose-600'}">
                         ${dish.total_cost_pct}%
                     </td>
-                    <td class="p-3 text-center print:hidden">
-                        <button onclick="openDishEditor('${dish.id}')" class="px-2 py-1 text-xs font-semibold rounded bg-blue-50 text-blue-600 hover:bg-blue-100">
+                    <td class="p-3 text-center print:hidden whitespace-nowrap">
+                        <button onclick="openDishEditor('${dish.id}')" class="px-2.5 py-1 text-xs font-semibold rounded bg-blue-50 text-blue-600 hover:bg-blue-100">
                             ✏️ ปรับ
                         </button>
                     </td>
@@ -1139,8 +1216,15 @@ function renderCostAnalysis(container) {
                         เป้าหมาย: ต้นทุนรวม &le; 40% | กำไรขั้นต้น &ge; 60% | ต้นทุนวัตถุดิบหลัก-รอง 35% - 40%
                     </p>
                 </div>
-                <div class="text-xs text-slate-600 bg-blue-50 px-3 py-1.5 rounded-lg border border-blue-200">
-                    💡 คลิกปุ่ม <strong class="text-blue-700">"ปรับสเปก"</strong> เพื่อแก้ไขราคาหรือปริมาณสด
+                <div class="flex items-center gap-2 flex-wrap text-xs">
+                    <span class="text-slate-600 bg-blue-50 px-3 py-1.5 rounded-lg border border-blue-200">
+                        💡 คลิกปุ่ม <strong class="text-blue-700">"ปรับสเปก"</strong> เพื่อแก้ไขสูตร เปิด/ปิดวัตถุดิบ หรือปรับราคาซื้อสด
+                    </span>
+                    ${!showDeliveryPrices ? `
+                        <button onclick="toggleDeliveryMode(true)" class="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg font-bold transition-all">
+                            🛵 แสดงราคา Grab/Lineman
+                        </button>
+                    ` : ''}
                 </div>
             </div>
         </div>
@@ -1150,13 +1234,17 @@ function renderCostAnalysis(container) {
                 <thead class="bg-slate-100 text-slate-700 uppercase font-bold text-[11px] border-b border-slate-200">
                     <tr>
                         <th class="p-3">เมนูอาหาร</th>
-                        <th class="p-3 text-right">ราคาขาย</th>
+                        <th class="p-3 text-right">ราคาขายหน้าร้าน</th>
+                        ${showDeliveryPrices ? `
+                            <th class="p-3 text-right bg-emerald-50/70 text-emerald-900 border-l border-emerald-200 whitespace-nowrap">🛵 Grab/LM (+${deliveryMarkupPct}%)</th>
+                            <th class="p-3 text-right bg-emerald-50/70 text-emerald-900 whitespace-nowrap">GP เดลิเวอรีสุทธิ (หัก GP 30%)</th>
+                        ` : ''}
                         <th class="p-3 text-right">ต้นทุนหลัก+รอง</th>
                         <th class="p-3 text-right">% หลัก-รอง</th>
                         <th class="p-3 text-right">เครื่องปรุง (~2.5%)</th>
                         <th class="p-3 text-right">ต้นทุนรวม</th>
                         <th class="p-3 text-right">Food Cost %</th>
-                        <th class="p-3 text-right">กำไรขั้นต้น (GP)</th>
+                        <th class="p-3 text-right">กำไรขั้นต้น (GP หน้าร้าน)</th>
                         <th class="p-3 text-center">สถานะ</th>
                         <th class="p-3 text-center">จัดการ</th>
                     </tr>
@@ -1172,12 +1260,21 @@ function renderCostAnalysis(container) {
                     ${dish.name}
                     <div class="text-[10px] text-slate-400 font-normal">รูปภาพชุดที่ ${dish.image_ref}</div>
                 </td>
-                <td class="p-3 text-right font-black text-slate-800">${dish.price}.-</td>
-                <td class="p-3 text-right font-bold text-blue-700">${dish.primary_secondary_cost}.-</td>
-                <td class="p-3 text-right font-semibold text-blue-600">${dish.ps_cost_pct}%</td>
-                <td class="p-3 text-right text-slate-400">${dish.minor_seasoning_cost}.-</td>
-                <td class="p-3 text-right font-bold text-slate-800">${dish.total_cost}.-</td>
-                <td class="p-3 text-right font-black ${dish.total_cost_pct <= 40 ? 'text-emerald-600' : 'text-rose-600'}">
+                <td class="p-3 text-right font-black text-slate-800 whitespace-nowrap">${dish.price}.-</td>
+                ${showDeliveryPrices ? `
+                    <td class="p-3 text-right font-black text-teal-800 bg-teal-50/40 border-l border-teal-200 whitespace-nowrap">
+                        ${dish.delivery_price}.-
+                    </td>
+                    <td class="p-3 text-right font-bold text-teal-900 bg-teal-50/40 whitespace-nowrap">
+                        ${dish.delivery_gross_profit}.- 
+                        <span class="text-[10px] font-black ${dish.delivery_gross_margin_pct >= 60 ? 'text-emerald-700' : 'text-amber-700'}">(${dish.delivery_gross_margin_pct}%)</span>
+                    </td>
+                ` : ''}
+                <td class="p-3 text-right font-bold text-blue-700 whitespace-nowrap">${dish.primary_secondary_cost}.-</td>
+                <td class="p-3 text-right font-semibold text-blue-600 whitespace-nowrap">${dish.ps_cost_pct}%</td>
+                <td class="p-3 text-right text-slate-400 whitespace-nowrap">${dish.minor_seasoning_cost}.-</td>
+                <td class="p-3 text-right font-bold text-slate-800 whitespace-nowrap">${dish.total_cost}.-</td>
+                <td class="p-3 text-right font-black whitespace-nowrap ${dish.total_cost_pct <= 40 ? 'text-emerald-600' : 'text-rose-600'}">
                     ${dish.total_cost_pct}%
                 </td>
                 <td class="p-3 text-right font-black text-emerald-700 whitespace-nowrap">
@@ -1206,66 +1303,434 @@ function renderCostAnalysis(container) {
     container.innerHTML = html;
 }
 
-// Modal Editor for a Dish (Touch-friendly & Mobile-ready)
-window.openDishEditor = function(dishId) {
-    const dish = appData.dishes.find(d => d.id === dishId);
-    if (!dish) return;
+// -------------------------------------------------------------------------
+// INTERACTIVE RECIPE & COST CUSTOMIZATION MODAL (GLOBAL PRICE SYNC & REAL-TIME)
+// -------------------------------------------------------------------------
 
-    let itemsHtml = '';
-    dish.items.forEach((item, idx) => {
-        itemsHtml += `
-            <div class="p-3 rounded-xl border border-slate-200 bg-slate-50 space-y-2">
-                <div class="flex items-center justify-between">
-                    <span class="text-xs md:text-sm font-bold text-slate-800">${item.rm_name}</span>
-                    <span class="text-[11px] text-slate-500">${item.action} (${item.unit})</span>
-                </div>
-                <div class="grid grid-cols-2 gap-2">
-                    <div>
-                        <label class="text-[10px] text-slate-500 font-semibold">ปริมาณ (${item.unit})</label>
-                        <input type="number" step="any" id="edit-portion-${idx}" value="${item.portion}" 
-                            class="w-full text-sm font-bold p-2 border border-slate-300 rounded-lg bg-white focus:ring-1 focus:ring-blue-500 focus:outline-none" />
-                    </div>
-                    <div>
-                        <label class="text-[10px] text-slate-500 font-semibold">คำแนะนำการเตรียม</label>
-                        <input type="text" id="edit-note-${idx}" value="${item.note || ''}" 
-                            class="w-full text-xs p-2 border border-slate-300 rounded-lg bg-white focus:ring-1 focus:ring-blue-500 focus:outline-none" />
-                    </div>
-                </div>
-            </div>
-        `;
+// Helper to render Raw Materials in dropdown grouped by category
+function renderRawMaterialOptions() {
+    if (!appData || !appData.raw_materials) return '';
+    const rms = Object.values(appData.raw_materials);
+    const groups = {};
+    rms.forEach(rm => {
+        if (!groups[rm.category]) groups[rm.category] = [];
+        groups[rm.category].push(rm);
     });
 
-    const modalHtml = `
-        <div id="dish-modal" class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-xs p-0 sm:p-4">
-            <div class="bg-white rounded-t-3xl sm:rounded-2xl max-w-lg w-full max-h-[92vh] overflow-y-auto shadow-2xl p-5 md:p-6 animate-in slide-in-from-bottom duration-200">
-                <div class="flex justify-between items-center pb-3 border-b border-slate-200">
-                    <div>
-                        <h3 class="text-base md:text-lg font-bold text-slate-800">ปรับสเปก: ${dish.name}</h3>
-                        <p class="text-xs text-slate-400">แก้ไขแล้วจะซิงค์ไปยังทุกเครื่องแบบเรียลไทม์</p>
+    let html = '';
+    Object.entries(groups).forEach(([cat, list]) => {
+        html += `<optgroup label="${cat}">`;
+        list.forEach(rm => {
+            const price = rm.use_custom && rm.custom_price_display !== undefined ? rm.custom_price_display : rm.display_price;
+            html += `<option value="${rm.id}">${rm.name} (${price} บ./${rm.display_unit})</option>`;
+        });
+        html += `</optgroup>`;
+    });
+    return html;
+}
+
+// Recalculate preview in memory for currentEditingDish
+function calculateModalPreview() {
+    if (!currentEditingDish) return;
+    let psCost = 0;
+    currentEditingDish.items.forEach(item => {
+        if (item.disabled) {
+            item.item_cost = 0;
+            item.cost_pct_of_sales = 0;
+            return;
+        }
+        const rm = appData.raw_materials[item.rm_id];
+        let effectivePrice = 0;
+        if (currentEditingRawMaterials[item.rm_id]) {
+            effectivePrice = currentEditingRawMaterials[item.rm_id].effectivePrice;
+        } else if (rm) {
+            effectivePrice = (rm.use_custom && rm.custom_price !== undefined) 
+                ? rm.custom_price 
+                : (rm.market_price || 0);
+        }
+        const itemCost = Math.round(effectivePrice * (item.portion || 0) * 100) / 100;
+        item.unit_cost = effectivePrice;
+        item.item_cost = itemCost;
+        item.cost_pct_of_sales = Math.round((itemCost / (currentEditingDish.price || 1)) * 1000) / 10;
+        psCost += itemCost;
+    });
+
+    currentEditingDish.primary_secondary_cost = Math.round(psCost * 100) / 100;
+    currentEditingDish.minor_seasoning_cost = Math.round(currentEditingDish.price * 0.025 * 100) / 100;
+    currentEditingDish.total_cost = Math.round((currentEditingDish.primary_secondary_cost + currentEditingDish.minor_seasoning_cost) * 100) / 100;
+    currentEditingDish.ps_cost_pct = Math.round((currentEditingDish.primary_secondary_cost / (currentEditingDish.price || 1)) * 1000) / 10;
+    currentEditingDish.total_cost_pct = Math.round((currentEditingDish.total_cost / (currentEditingDish.price || 1)) * 1000) / 10;
+    currentEditingDish.gross_profit = Math.round((currentEditingDish.price - currentEditingDish.total_cost) * 100) / 100;
+    currentEditingDish.gross_margin_pct = Math.round((currentEditingDish.gross_profit / (currentEditingDish.price || 1)) * 1000) / 10;
+    currentEditingDish.is_target_compliant = (currentEditingDish.total_cost_pct <= 40.0 && currentEditingDish.gross_margin_pct >= 60.0);
+
+    // Delivery Preview
+    const markup = currentEditingDish.delivery_markup_pct || deliveryMarkupPct || 30;
+    currentEditingDish.delivery_price = Math.round(currentEditingDish.price * (1 + markup / 100));
+    const deliveryPlatformGP = 0.30;
+    currentEditingDish.delivery_net_revenue = Math.round(currentEditingDish.delivery_price * (1 - deliveryPlatformGP) * 100) / 100;
+    currentEditingDish.delivery_gross_profit = Math.round((currentEditingDish.delivery_net_revenue - currentEditingDish.total_cost) * 100) / 100;
+    currentEditingDish.delivery_gross_margin_pct = Math.round((currentEditingDish.delivery_gross_profit / (currentEditingDish.delivery_net_revenue || 1)) * 1000) / 10;
+}
+
+// Update the top KPI summary banner in the modal
+function updateModalKPIBanner() {
+    if (!currentEditingDish) return;
+
+    const psCostEl = document.getElementById('modal-ps-cost');
+    if (psCostEl) psCostEl.textContent = `${currentEditingDish.primary_secondary_cost}.-`;
+    const psPctEl = document.getElementById('modal-ps-cost-pct');
+    if (psPctEl) psPctEl.textContent = `(${currentEditingDish.ps_cost_pct}%)`;
+
+    const totalCostEl = document.getElementById('modal-total-cost');
+    if (totalCostEl) totalCostEl.textContent = `${currentEditingDish.total_cost}.-`;
+    const totalPctEl = document.getElementById('modal-total-cost-pct');
+    if (totalPctEl) {
+        totalPctEl.textContent = `(${currentEditingDish.total_cost_pct}%)`;
+        totalPctEl.className = `text-[10px] font-bold block ${currentEditingDish.total_cost_pct <= 40 ? 'text-emerald-600' : 'text-rose-600'}`;
+    }
+
+    const gpEl = document.getElementById('modal-gross-profit');
+    if (gpEl) gpEl.textContent = `${currentEditingDish.gross_profit}.-`;
+    const gmEl = document.getElementById('modal-gross-margin');
+    if (gmEl) gmEl.textContent = `(${currentEditingDish.gross_margin_pct}%)`;
+
+    const delPriceEl = document.getElementById('modal-delivery-price');
+    if (delPriceEl) delPriceEl.textContent = `${currentEditingDish.delivery_price}.-`;
+    const delGpEl = document.getElementById('modal-delivery-gp');
+    if (delGpEl) delGpEl.textContent = `GP สุทธิ ${currentEditingDish.delivery_gross_profit}.-`;
+
+    const badgeEl = document.getElementById('modal-compliance-badge');
+    if (badgeEl) {
+        badgeEl.textContent = currentEditingDish.is_target_compliant ? '✅ ผ่านเกณฑ์ (≤ 40%)' : '⚠️ เกินเกณฑ์เป้าหมาย (> 40%)';
+        badgeEl.className = `px-2.5 py-0.5 rounded-full text-xs font-black ${currentEditingDish.is_target_compliant ? 'bg-emerald-600 text-white shadow-xs' : 'bg-rose-600 text-white shadow-xs'}`;
+    }
+
+    const bannerEl = document.getElementById('modal-kpi-banner');
+    if (bannerEl) {
+        bannerEl.className = `p-3.5 rounded-2xl border transition-all ${currentEditingDish.is_target_compliant ? 'bg-emerald-50/70 border-emerald-300' : 'bg-rose-50/70 border-rose-300'}`;
+    }
+}
+
+// Update single row cost display without replacing input DOM (preserves keyboard focus)
+function updateRowCostDisplay(idx) {
+    const rowEl = document.querySelector(`.dish-modal-item-row[data-item-idx="${idx}"]`);
+    if (!rowEl || !currentEditingDish || !currentEditingDish.items[idx]) return;
+    const item = currentEditingDish.items[idx];
+    const costEl = rowEl.querySelector('.modal-row-cost-val');
+    if (costEl) costEl.textContent = item.disabled ? '0.00 บาท' : `${(item.item_cost || 0).toFixed(2)} บาท`;
+    const pctEl = rowEl.querySelector('.modal-row-pct-val');
+    if (pctEl) pctEl.textContent = item.disabled ? '0.0% ของราคาขายหน้าร้าน' : `${item.cost_pct_of_sales}% ของราคาขายหน้าร้าน`;
+}
+
+// Render HTML for the modal items list
+function renderModalItemsListHtml() {
+    if (!currentEditingDish || !currentEditingDish.items || currentEditingDish.items.length === 0) {
+        return `<div class="p-6 text-center text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200 text-xs">ยังไม่มีวัตถุดิบในเมนูนี้ คลิก "➕ เพิ่มวัตถุดิบ" เพื่อเพิ่ม</div>`;
+    }
+
+    return currentEditingDish.items.map((item, idx) => {
+        const rm = appData.raw_materials[item.rm_id];
+        const isCustomPriceEdited = currentEditingRawMaterials[item.rm_id] !== undefined;
+        const currentDisplayPrice = isCustomPriceEdited 
+            ? currentEditingRawMaterials[item.rm_id].display_price 
+            : (rm ? (rm.use_custom && rm.custom_price_display !== undefined ? rm.custom_price_display : rm.display_price) : 0);
+        const displayUnit = rm ? rm.display_unit : (item.unit === 'g' ? 'กก.' : item.unit === 'ml' ? 'ลิตร' : item.unit);
+        const usageCount = getRawMaterialUsageCount(item.rm_id);
+        const isDisabled = item.disabled === true;
+
+        const actionIcon = item.action === 'ชั่งน้ำหนัก' ? '⚖️' : item.action === 'นับชิ้น' ? '🔢' : '🧪';
+
+        return `
+            <div class="dish-modal-item-row p-3 rounded-2xl border transition-all ${
+                isDisabled 
+                    ? 'bg-slate-100/80 border-slate-200 opacity-60' 
+                    : 'bg-white border-slate-200 shadow-2xs hover:border-blue-300'
+            }" data-item-idx="${idx}">
+                <!-- Row Top Bar: Checkbox + Name + Type Toggle + Action + Trash -->
+                <div class="flex items-center justify-between gap-2 pb-2 border-b border-slate-100">
+                    <div class="flex items-center gap-2 min-w-0">
+                        <label class="cursor-pointer inline-flex items-center" title="${isDisabled ? 'คลิกเพื่อเปิดใช้งานวัตถุดิบนี้' : 'คลิกเพื่อปิดใช้งาน (ตัดออกจากต้นทุน)'}">
+                            <input type="checkbox" ${!isDisabled ? 'checked' : ''} 
+                                onchange="toggleModalItem(${idx}, this.checked)" 
+                                class="w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer" />
+                        </label>
+                        <span class="text-xs sm:text-sm font-black text-slate-800 truncate ${isDisabled ? 'line-through text-slate-400' : ''}">
+                            ${item.rm_name}
+                        </span>
+                        ${isDisabled ? '<span class="text-[10px] font-bold px-1.5 py-0.2 rounded bg-slate-200 text-slate-600">ปิดใช้งาน</span>' : ''}
                     </div>
-                    <button onclick="closeDishEditor()" class="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 text-lg hover:bg-slate-200">&times;</button>
+
+                    <div class="flex items-center gap-1.5 shrink-0">
+                        <!-- Switch Primary / Secondary -->
+                        <button type="button" onclick="toggleModalItemType(${idx})" 
+                            class="text-[10px] font-black px-2 py-0.5 rounded-full border transition-all ${
+                                item.type === 'primary' 
+                                    ? 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100' 
+                                    : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+                            }" title="คลิกเพื่อสลับระหว่างวัตถุดิบหลัก / วัตถุดิบรอง">
+                            ${item.type === 'primary' ? '⭐ วัตถุดิบหลัก' : '⚪ วัตถุดิบรอง'}
+                        </button>
+
+                        <!-- Action Badge -->
+                        <span class="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-50 text-slate-500 border border-slate-200">
+                            ${actionIcon} ${item.action}
+                        </span>
+
+                        <!-- Delete Button -->
+                        <button type="button" onclick="removeModalItem(${idx})" 
+                            class="w-6 h-6 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 flex items-center justify-center text-xs transition-colors" 
+                            title="ลบวัตถุดิบนี้ออกจากเมนู">
+                            🗑️
+                        </button>
+                    </div>
                 </div>
 
-                <div class="mt-4 space-y-4">
-                    <div>
-                        <label class="text-xs font-bold text-slate-700 block mb-1">ราคาขายหน้าป้าย (บาท)</label>
-                        <input type="number" id="edit-dish-price" value="${dish.price}" class="w-full text-base font-black p-2.5 border border-slate-300 rounded-xl bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                <!-- Row Controls Grid: Inline Portion Edit & Inline RM Purchase Price Edit -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2">
+                    <!-- Column 1: Portion in dish -->
+                    <div class="bg-slate-50/80 p-2 rounded-xl border border-slate-100">
+                        <div class="flex items-center justify-between text-[11px] font-semibold text-slate-600 mb-1">
+                            <span>ปริมาณที่ใช้ในจาน:</span>
+                            <span class="text-blue-700 font-bold">${item.action}</span>
+                        </div>
+                        <div class="flex items-center gap-1.5">
+                            <input type="number" step="any" min="0" value="${item.portion}" 
+                                oninput="onModalPortionChange(${idx}, this.value)" 
+                                ${isDisabled ? 'disabled' : ''}
+                                class="w-full text-xs font-black p-1.5 border border-slate-300 rounded-lg bg-white focus:ring-1 focus:ring-blue-500 focus:outline-none" />
+                            <span class="text-xs font-bold text-slate-600 shrink-0 w-8">${item.unit}</span>
+                        </div>
                     </div>
 
-                    <div>
-                        <label class="text-xs font-bold text-slate-700 block mb-1">วัตถุดิบหลักและรอง (Portion Control)</label>
-                        <div class="space-y-2 mt-1">
-                            ${itemsHtml}
+                    <!-- Column 2: Purchase Price per Unit (Global Sync) -->
+                    <div class="bg-slate-50/80 p-2 rounded-xl border border-slate-100">
+                        <div class="flex items-center justify-between text-[11px] font-semibold text-slate-600 mb-1">
+                            <span>ราคาซื้อหน้าร้าน:</span>
+                            <span class="text-[10px] font-bold text-blue-700 bg-blue-100/70 px-1 py-0.2 rounded" title="ราคาซื้อนี้จะเชื่อมโยงและคำนวณใหม่กับทุกเมนูที่ใช้วัตถุดิบนี้">
+                                💡 ซิงค์ ${usageCount} เมนู
+                            </span>
+                        </div>
+                        <div class="flex items-center gap-1.5">
+                            <input type="number" step="any" min="0" value="${currentDisplayPrice}" 
+                                oninput="onModalRmPriceChange('${item.rm_id}', this.value)" 
+                                class="w-full text-xs font-black p-1.5 border border-slate-300 rounded-lg bg-white focus:ring-1 focus:ring-blue-500 focus:outline-none" />
+                            <span class="text-xs font-bold text-slate-600 shrink-0">บ./${displayUnit}</span>
                         </div>
                     </div>
                 </div>
 
-                <div class="mt-6 flex gap-2 pt-3 border-t border-slate-200">
-                    <button onclick="closeDishEditor()" class="flex-1 py-2.5 text-xs font-bold rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200">
+                <!-- Row Bottom: Real-Time Calculated Cost & % of Dine-in Sales! -->
+                <div class="mt-2 p-2 rounded-xl bg-blue-50/50 border border-blue-100 flex flex-wrap items-center justify-between gap-1 text-xs">
+                    <div class="flex items-center gap-2">
+                        <span class="text-[11px] font-semibold text-slate-600">ต้นทุนต่อจาน:</span>
+                        <strong class="modal-row-cost-val text-xs sm:text-sm font-black text-blue-800">
+                            ${isDisabled ? '0.00 บาท' : ((item.item_cost || 0).toFixed(2) + ' บาท')}
+                        </strong>
+                    </div>
+
+                    <div class="flex items-center gap-1">
+                        <span class="text-[10px] text-slate-500">คิดเป็น</span>
+                        <span class="modal-row-pct-val text-[11px] font-black px-2 py-0.5 rounded-md ${
+                            isDisabled ? 'bg-slate-200 text-slate-600' : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                        }">
+                            ${isDisabled ? '0.0% ของราคาขายหน้าร้าน' : ((item.cost_pct_of_sales || 0) + '% ของราคาขายหน้าร้าน')}
+                        </span>
+                    </div>
+                </div>
+
+                <!-- Prep Note Input -->
+                <div class="mt-2">
+                    <input type="text" placeholder="📝 บันทึกคำแนะนำเตรียมวัตถุดิบ (เช่น ลอกเปลือก, หั่นเต๋า, ต้มน้ำสต็อก)" 
+                        value="${item.note || ''}" 
+                        oninput="onModalNoteChange(${idx}, this.value)" 
+                        class="w-full text-[11px] p-1.5 border border-slate-200 rounded-lg bg-slate-50 focus:bg-white focus:ring-1 focus:ring-blue-500 focus:outline-none placeholder:text-slate-400" />
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+// Open Recipe & Cost Customization Modal
+window.openDishEditor = function(dishId) {
+    const dish = appData.dishes.find(d => d.id === dishId);
+    if (!dish) return;
+
+    // Deep copy dish for editing
+    currentEditingDish = JSON.parse(JSON.stringify(dish));
+    currentEditingDish.items = currentEditingDish.items || [];
+    currentEditingDish.items.forEach(it => {
+        if (it.disabled === undefined) it.disabled = false;
+    });
+    currentEditingRawMaterials = {}; // reset pending rm price changes
+
+    calculateModalPreview();
+
+    const catObj = appData.categories.find(c => c.id === currentEditingDish.category);
+    const catName = catObj ? catObj.name.split('(')[0] : '';
+
+    const modalHtml = `
+        <div id="dish-modal" class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-xs p-0 sm:p-4">
+            <div class="bg-white rounded-t-3xl sm:rounded-2xl max-w-2xl w-full max-h-[94vh] flex flex-col shadow-2xl animate-in slide-in-from-bottom duration-200">
+                <!-- Modal Header -->
+                <div class="p-4 sm:p-5 border-b border-slate-200 flex justify-between items-center shrink-0 bg-slate-50/80 rounded-t-2xl">
+                    <div class="min-w-0 pr-2">
+                        <div class="flex items-center gap-2">
+                            <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-800 uppercase tracking-wider">
+                                ${catName} | รูปที่ ${currentEditingDish.image_ref}
+                            </span>
+                            <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-800">
+                                ⚡ แก้ไขสดซิงค์ทั่วระบบ
+                            </span>
+                        </div>
+                        <h3 class="text-base sm:text-lg font-black text-slate-800 truncate mt-1">
+                            ปรับแต่งสูตร & ต้นทุน: ${currentEditingDish.name}
+                        </h3>
+                    </div>
+                    <button onclick="closeDishEditor()" class="w-8 h-8 rounded-full bg-slate-200/80 hover:bg-slate-300 flex items-center justify-center text-slate-600 text-lg font-bold transition-all shrink-0">&times;</button>
+                </div>
+
+                <!-- Modal Body (Scrollable) -->
+                <div class="p-4 sm:p-5 overflow-y-auto space-y-4 flex-1">
+                    <!-- Live Cost & Margin KPI Summary Card -->
+                    <div id="modal-kpi-banner" class="p-3.5 rounded-2xl border transition-all ${currentEditingDish.is_target_compliant ? 'bg-emerald-50/70 border-emerald-300' : 'bg-rose-50/70 border-rose-300'}">
+                        <div class="flex items-center justify-between gap-2 border-b border-slate-200/60 pb-2 mb-2">
+                            <div class="flex items-center gap-1.5">
+                                <span class="text-sm font-black text-slate-800">📊 ผลคำนวณต้นทุนเรียลไทม์ (Live Margin)</span>
+                            </div>
+                            <span id="modal-compliance-badge" class="px-2.5 py-0.5 rounded-full text-xs font-black ${currentEditingDish.is_target_compliant ? 'bg-emerald-600 text-white shadow-xs' : 'bg-rose-600 text-white shadow-xs'}">
+                                ${currentEditingDish.is_target_compliant ? '✅ ผ่านเกณฑ์ (≤ 40%)' : '⚠️ เกินเกณฑ์เป้าหมาย (> 40%)'}
+                            </span>
+                        </div>
+
+                        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-xs">
+                            <div class="p-2 rounded-xl bg-white border border-slate-200/80 shadow-2xs">
+                                <span class="text-slate-500 block text-[10px] font-medium">ต้นทุนหลัก-รอง</span>
+                                <strong id="modal-ps-cost" class="text-xs sm:text-sm font-black text-blue-700">${currentEditingDish.primary_secondary_cost}.-</strong>
+                                <span id="modal-ps-cost-pct" class="text-[10px] text-slate-400 block">(${currentEditingDish.ps_cost_pct}%)</span>
+                            </div>
+                            <div class="p-2 rounded-xl bg-white border border-slate-200/80 shadow-2xs">
+                                <span class="text-slate-500 block text-[10px] font-medium">ต้นทุนรวม (+2.5%)</span>
+                                <strong id="modal-total-cost" class="text-xs sm:text-sm font-black text-slate-800">${currentEditingDish.total_cost}.-</strong>
+                                <span id="modal-total-cost-pct" class="text-[10px] font-bold block ${currentEditingDish.total_cost_pct <= 40 ? 'text-emerald-600' : 'text-rose-600'}">(${currentEditingDish.total_cost_pct}%)</span>
+                            </div>
+                            <div class="p-2 rounded-xl bg-white border border-slate-200/80 shadow-2xs">
+                                <span class="text-slate-500 block text-[10px] font-medium">กำไรขั้นต้น (GP)</span>
+                                <strong id="modal-gross-profit" class="text-xs sm:text-sm font-black text-emerald-700">${currentEditingDish.gross_profit}.-</strong>
+                                <span id="modal-gross-margin" class="text-[10px] text-emerald-600 font-bold block">(${currentEditingDish.gross_margin_pct}%)</span>
+                            </div>
+                            <div class="p-2 rounded-xl bg-white border border-slate-200/80 shadow-2xs">
+                                <span class="text-slate-500 block text-[10px] font-medium">ราคา Grab/LM (+${deliveryMarkupPct}%)</span>
+                                <strong id="modal-delivery-price" class="text-xs sm:text-sm font-black text-teal-800">${currentEditingDish.delivery_price}.-</strong>
+                                <span id="modal-delivery-gp" class="text-[10px] text-teal-600 font-semibold block">GP สุทธิ ${currentEditingDish.delivery_gross_profit}.-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Selling Price Setting -->
+                    <div class="bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
+                        <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+                            <div>
+                                <label for="modal-dish-price" class="text-xs font-black text-slate-800 flex items-center gap-1">
+                                    💵 ราคาขายหน้าร้านปกติ (บาท)
+                                    <span class="text-[10px] font-normal text-slate-500">(ใช้เป็นฐานคำนวณ % ต้นทุนของวัตถุดิบแต่ละตัว)</span>
+                                </label>
+                            </div>
+                            <div class="flex items-center gap-2 w-full sm:w-auto">
+                                <input type="number" id="modal-dish-price" value="${currentEditingDish.price}" min="1" step="1" 
+                                    oninput="onModalPriceChange(this.value)" 
+                                    class="w-full sm:w-36 text-base font-black text-right p-2 border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                                <span class="text-xs font-bold text-slate-700">บาท</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Ingredients List Header & Helper -->
+                    <div>
+                        <div class="flex items-center justify-between gap-2 mb-1.5">
+                            <div>
+                                <h4 class="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+                                    🥬 วัตถุดิบในสูตร (Main & Secondary Ingredients)
+                                </h4>
+                                <p class="text-[11px] text-slate-500">
+                                    เปิด/ปิดรายการ • แก้ไขปริมาณ/ราคาซื้อ • ดู % ต้นทุนเทียบราคาขายหน้าร้านได้ทันที
+                                </p>
+                            </div>
+                            <button type="button" onclick="showAddIngredientDropdown()" class="px-2.5 py-1 text-xs font-bold rounded-lg bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-all shrink-0">
+                                ➕ เพิ่มวัตถุดิบ
+                            </button>
+                        </div>
+
+                        <!-- Add Ingredient Dropdown / Card -->
+                        <div id="modal-add-box" class="hidden mb-3 p-3 bg-blue-50/70 border border-blue-200 rounded-2xl space-y-2.5 transition-all">
+                            <div class="flex items-center justify-between">
+                                <span class="text-xs font-bold text-blue-900">➕ เลือกวัตถุดิบที่จะเพิ่มเข้าสู่สูตรเมนูนี้:</span>
+                                <button type="button" onclick="hideAddIngredientDropdown()" class="text-xs font-bold text-slate-500 hover:text-slate-800">&times; ปิด</button>
+                            </div>
+                            <div class="flex flex-col sm:flex-row gap-2">
+                                <select id="modal-select-existing-rm" class="flex-1 text-xs p-2 rounded-xl border border-blue-300 bg-white font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                    <option value="">-- เลือกวัตถุดิบจากคลัง (${Object.keys(appData.raw_materials).length} รายการ) --</option>
+                                    ${renderRawMaterialOptions()}
+                                </select>
+                                <button type="button" onclick="addSelectedExistingRm()" class="px-3 py-2 text-xs font-bold rounded-xl bg-blue-600 text-white hover:bg-blue-700 shadow-xs shrink-0">
+                                    เพิ่มลงสูตร
+                                </button>
+                            </div>
+                            <div class="text-center pt-1 border-t border-blue-200/60">
+                                <button type="button" onclick="toggleCustomRmSubForm()" class="text-xs font-bold text-blue-700 hover:text-blue-900 underline">
+                                    ✨ หรือคลิกที่นี่ เพื่อสร้างวัตถุดิบใหม่นอกคลัง
+                                </button>
+                            </div>
+                            <!-- Custom RM Creation Sub-form -->
+                            <div id="modal-custom-rm-form" class="hidden pt-2 border-t border-blue-200 space-y-2">
+                                <span class="text-[11px] font-bold text-slate-700 block">สร้างวัตถุดิบใหม่เข้าระบบ:</span>
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                                    <input type="text" id="new-rm-name" placeholder="ชื่อวัตถุดิบ (เช่น ปลาหมึกสายสด)" class="p-2 border border-slate-300 rounded-lg bg-white" />
+                                    <select id="new-rm-category" class="p-2 border border-slate-300 rounded-lg bg-white">
+                                        <option value="อาหารทะเลสด">อาหารทะเลสด</option>
+                                        <option value="เนื้อสัตว์และไข่">เนื้อสัตว์และไข่</option>
+                                        <option value="ผักสดและสมุนไพร">ผักสดและสมุนไพร</option>
+                                        <option value="เครื่องปรุงและซอส">เครื่องปรุงและซอส</option>
+                                        <option value="ของแห้งและอื่นๆ">ของแห้งและอื่นๆ</option>
+                                    </select>
+                                    <div class="flex items-center gap-1">
+                                        <input type="number" id="new-rm-price" placeholder="ราคาซื้อ (บ.)" class="w-full p-2 border border-slate-300 rounded-lg bg-white" />
+                                        <select id="new-rm-unit" class="p-2 border border-slate-300 rounded-lg bg-white">
+                                            <option value="g">บ./กก. (ชั่งกรัม)</option>
+                                            <option value="ml">บ./ลิตร (ตวงมล.)</option>
+                                            <option value="ฟอง">บ./ฟอง (นับชิ้น)</option>
+                                            <option value="ตัว">บ./ตัว (นับชิ้น)</option>
+                                            <option value="ชิ้น">บ./ชิ้น (นับชิ้น)</option>
+                                        </select>
+                                    </div>
+                                    <div class="flex items-center gap-1">
+                                        <input type="number" id="new-rm-portion" placeholder="ปริมาณที่ใส่ในจานนี้" class="w-full p-2 border border-slate-300 rounded-lg bg-white" />
+                                        <select id="new-rm-type" class="p-2 border border-slate-300 rounded-lg bg-white">
+                                            <option value="primary">วัตถุดิบหลัก</option>
+                                            <option value="secondary" selected>วัตถุดิบรอง</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <button type="button" onclick="submitCreateCustomRm()" class="w-full py-1.5 text-xs font-bold rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 shadow-xs">
+                                    💾 สร้างวัตถุดิบและใส่ในเมนูนี้
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Items Container -->
+                        <div id="modal-items-list" class="space-y-2.5">
+                            ${renderModalItemsListHtml()}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Modal Footer -->
+                <div class="p-4 sm:p-5 border-t border-slate-200 flex flex-col sm:flex-row gap-2 shrink-0 bg-slate-50/80 rounded-b-2xl">
+                    <button type="button" onclick="closeDishEditor()" class="w-full sm:w-auto px-5 py-2.5 text-xs font-bold rounded-xl bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 transition-all">
                         ยกเลิก
                     </button>
-                    <button onclick="saveDishEditor('${dish.id}')" class="flex-1 py-2.5 text-xs font-bold rounded-xl bg-blue-600 text-white hover:bg-blue-700 shadow-md">
-                        บันทึก & กระจายเรียลไทม์
+                    <button type="button" onclick="saveDishEditor('${currentEditingDish.id}')" class="flex-1 py-2.5 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-700 text-white shadow-md flex items-center justify-center gap-2 transition-all">
+                        💾 บันทึก & อัปเดตซิงค์ทั่วระบบ (Global Sync)
                     </button>
                 </div>
             </div>
@@ -1277,49 +1742,274 @@ window.openDishEditor = function(dishId) {
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 };
 
+// Close modal editor
 window.closeDishEditor = function() {
     const modal = document.getElementById('dish-modal');
     if (modal) modal.remove();
+    currentEditingDish = null;
+    currentEditingRawMaterials = {};
 };
 
-window.saveDishEditor = function(dishId) {
-    const dish = appData.dishes.find(d => d.id === dishId);
-    if (!dish) return;
+// Toggle enable/disable raw material in dish
+window.toggleModalItem = function(idx, checked) {
+    if (!currentEditingDish || !currentEditingDish.items[idx]) return;
+    currentEditingDish.items[idx].disabled = !checked;
+    calculateModalPreview();
+    updateModalKPIBanner();
+    const list = document.getElementById('modal-items-list');
+    if (list) list.innerHTML = renderModalItemsListHtml();
+};
 
-    const newPrice = parseFloat(document.getElementById('edit-dish-price').value);
-    if (!isNaN(newPrice) && newPrice > 0) {
-        dish.price = newPrice;
+// Toggle Primary / Secondary ingredient type
+window.toggleModalItemType = function(idx) {
+    if (!currentEditingDish || !currentEditingDish.items[idx]) return;
+    const current = currentEditingDish.items[idx].type;
+    currentEditingDish.items[idx].type = current === 'primary' ? 'secondary' : 'primary';
+    const list = document.getElementById('modal-items-list');
+    if (list) list.innerHTML = renderModalItemsListHtml();
+};
+
+// Handle Portion changes inline
+window.onModalPortionChange = function(idx, val) {
+    if (!currentEditingDish || !currentEditingDish.items[idx]) return;
+    const p = parseFloat(val);
+    currentEditingDish.items[idx].portion = isNaN(p) ? 0 : p;
+    calculateModalPreview();
+    updateModalKPIBanner();
+    updateRowCostDisplay(idx);
+};
+
+// Handle Raw Material Purchase Price changes inline (Global Sync Cascade)
+window.onModalRmPriceChange = function(rmId, val) {
+    const num = parseFloat(val);
+    if (isNaN(num) || num < 0) return;
+    const rm = appData.raw_materials[rmId];
+    if (!rm) return;
+
+    let effectivePrice = num;
+    if (rm.unit === 'g' || rm.unit === 'ml') {
+        effectivePrice = Math.round((num / 1000) * 10000) / 10000;
     }
 
-    dish.items.forEach((item, idx) => {
-        const portionInput = document.getElementById(`edit-portion-${idx}`);
-        const noteInput = document.getElementById(`edit-note-${idx}`);
-        if (portionInput) {
-            const p = parseFloat(portionInput.value);
-            if (!isNaN(p)) item.portion = p;
+    currentEditingRawMaterials[rmId] = {
+        display_price: num,
+        effectivePrice: effectivePrice
+    };
+
+    calculateModalPreview();
+    updateModalKPIBanner();
+    currentEditingDish.items.forEach((it, idx) => {
+        if (it.rm_id === rmId) {
+            updateRowCostDisplay(idx);
         }
-        if (noteInput) {
-            item.note = noteInput.value.trim();
+    });
+};
+
+// Handle Dish Selling Price changes
+window.onModalPriceChange = function(val) {
+    if (!currentEditingDish) return;
+    const p = parseFloat(val);
+    if (!isNaN(p) && p > 0) {
+        currentEditingDish.price = p;
+        calculateModalPreview();
+        updateModalKPIBanner();
+        currentEditingDish.items.forEach((it, idx) => {
+            updateRowCostDisplay(idx);
+        });
+    }
+};
+
+// Handle Dish Item Prep Note changes
+window.onModalNoteChange = function(idx, val) {
+    if (!currentEditingDish || !currentEditingDish.items[idx]) return;
+    currentEditingDish.items[idx].note = val;
+};
+
+// Remove raw material from dish
+window.removeModalItem = function(idx) {
+    if (!currentEditingDish || !currentEditingDish.items[idx]) return;
+    const item = currentEditingDish.items[idx];
+    if (confirm(`คุณต้องการลบ "${item.rm_name}" ออกจากสูตรอาหารนี้ใช่หรือไม่?`)) {
+        currentEditingDish.items.splice(idx, 1);
+        calculateModalPreview();
+        updateModalKPIBanner();
+        const list = document.getElementById('modal-items-list');
+        if (list) list.innerHTML = renderModalItemsListHtml();
+    }
+};
+
+// Add Ingredient Dropdown Controls
+window.showAddIngredientDropdown = function() {
+    const box = document.getElementById('modal-add-box');
+    if (box) box.classList.remove('hidden');
+};
+
+window.hideAddIngredientDropdown = function() {
+    const box = document.getElementById('modal-add-box');
+    if (box) box.classList.add('hidden');
+};
+
+window.toggleCustomRmSubForm = function() {
+    const form = document.getElementById('modal-custom-rm-form');
+    if (form) form.classList.toggle('hidden');
+};
+
+// Add existing raw material from catalog
+window.addSelectedExistingRm = function() {
+    const select = document.getElementById('modal-select-existing-rm');
+    if (!select || !select.value) {
+        alert('กรุณาเลือกวัตถุดิบจากรายการ');
+        return;
+    }
+    const rmId = select.value;
+    const rm = appData.raw_materials[rmId];
+    if (!rm) return;
+
+    const action = (rm.unit === 'g') ? 'ชั่งน้ำหนัก' : (rm.unit === 'ml') ? 'ตวงปริมาตร' : 'นับชิ้น';
+    const defaultPortion = (rm.unit === 'g') ? 100 : (rm.unit === 'ml') ? 50 : 1;
+
+    currentEditingDish.items.push({
+        rm_id: rm.id,
+        rm_name: rm.name,
+        type: 'secondary',
+        action: action,
+        portion: defaultPortion,
+        unit: rm.unit,
+        disabled: false,
+        note: ''
+    });
+
+    calculateModalPreview();
+    updateModalKPIBanner();
+    const list = document.getElementById('modal-items-list');
+    if (list) list.innerHTML = renderModalItemsListHtml();
+    hideAddIngredientDropdown();
+    showToast(`เพิ่ม "${rm.name}" ในสูตรแล้ว`);
+};
+
+// Create new custom raw material on the fly
+window.submitCreateCustomRm = function() {
+    const nameInput = document.getElementById('new-rm-name');
+    const catInput = document.getElementById('new-rm-category');
+    const priceInput = document.getElementById('new-rm-price');
+    const unitSelect = document.getElementById('new-rm-unit');
+    const portionInput = document.getElementById('new-rm-portion');
+    const typeSelect = document.getElementById('new-rm-type');
+
+    if (!nameInput || !nameInput.value.trim()) {
+        alert('กรุณากรอกชื่อวัตถุดิบ');
+        return;
+    }
+    const name = nameInput.value.trim();
+    const cat = catInput ? catInput.value : 'อาหารทะเลสด';
+    const displayPrice = parseFloat(priceInput ? priceInput.value : '0') || 0;
+    const unit = unitSelect ? unitSelect.value : 'g';
+    const portion = parseFloat(portionInput ? portionInput.value : '1') || 1;
+    const type = typeSelect ? typeSelect.value : 'secondary';
+
+    const rmId = 'RM_CUSTOM_' + Date.now();
+    const action = (unit === 'g') ? 'ชั่งน้ำหนัก' : (unit === 'ml') ? 'ตวงปริมาตร' : 'นับชิ้น';
+    const displayUnit = (unit === 'g') ? 'กก.' : (unit === 'ml') ? 'ลิตร' : unit;
+
+    let marketPrice = displayPrice;
+    if (unit === 'g' || unit === 'ml') {
+        marketPrice = Math.round((displayPrice / 1000) * 10000) / 10000;
+    }
+
+    const newRm = {
+        id: rmId,
+        name: name,
+        category: cat,
+        unit: unit,
+        display_unit: displayUnit,
+        display_price: displayPrice,
+        market_price: marketPrice,
+        market_price_per_kg: unit === 'g' ? displayPrice : undefined,
+        previous_price: displayPrice,
+        change_percent: 0,
+        last_updated: new Date().toISOString().split('T')[0],
+        use_custom: true,
+        custom_price_display: displayPrice,
+        custom_price: marketPrice
+    };
+
+    appData.raw_materials[rmId] = newRm;
+
+    currentEditingDish.items.push({
+        rm_id: rmId,
+        rm_name: name,
+        type: type,
+        action: action,
+        portion: portion,
+        unit: unit,
+        disabled: false,
+        note: ''
+    });
+
+    calculateModalPreview();
+    updateModalKPIBanner();
+    const list = document.getElementById('modal-items-list');
+    if (list) list.innerHTML = renderModalItemsListHtml();
+    hideAddIngredientDropdown();
+    showToast(`สร้างวัตถุดิบใหม่ "${name}" และเพิ่มเข้าสูตรสำเร็จ!`);
+};
+
+// Save dish changes and synchronize globally across all dishes & devices
+window.saveDishEditor = function(dishId) {
+    if (!currentEditingDish || currentEditingDish.id !== dishId) return;
+
+    // 1. Commit any raw material custom price changes to global master
+    const updatedRmList = [];
+    Object.entries(currentEditingRawMaterials).forEach(([rmId, pData]) => {
+        const rm = appData.raw_materials[rmId];
+        if (rm) {
+            rm.use_custom = true;
+            rm.custom_price_display = pData.display_price;
+            rm.custom_price = pData.effectivePrice;
+            updatedRmList.push(rm);
+
+            // Broadcast raw material price update to all devices
+            broadcastMessage({
+                type: 'UPDATE_RM_PRICE',
+                rmId: rm.id,
+                useCustom: true,
+                customVal: pData.display_price,
+                effectivePrice: pData.effectivePrice
+            });
         }
     });
 
-    dish.is_customized = true;
-    closeDishEditor();
-    recalculateAllDishes();
-    saveData(true);
-    renderAll();
+    // 2. Commit current editing dish to master dish list
+    const dishIndex = appData.dishes.findIndex(d => d.id === dishId);
+    if (dishIndex !== -1) {
+        currentEditingDish.is_customized = true;
+        appData.dishes[dishIndex] = JSON.parse(JSON.stringify(currentEditingDish));
+    }
 
-    // Broadcast updated dish to all devices
+    // 3. Recalculate all dishes globally (so other dishes using same updated RM will reflect immediately!)
+    recalculateAllDishes();
+
+    // 4. Save to localStorage
+    saveData(true);
+
+    // 5. Broadcast dish update to peers
     broadcastMessage({
         type: 'UPDATE_DISH_SPEC',
-        dishId: dish.id,
-        updatedDish: dish
+        dishId: currentEditingDish.id,
+        updatedDish: appData.dishes[dishIndex]
     });
 
-    // Save state to 24/7 cloud broker
+    // 6. Save retained delta state in cloud 24/7 broker
     publishCloudDelta();
 
-    showToast(`อัปเดตสเปก "${dish.name}" และกระจายสู่เครื่องทีมงานเรียลไทม์แล้ว`);
+    // 7. Close modal and render all views
+    closeDishEditor();
+    renderAll();
+
+    const syncMsg = updatedRmList.length > 0 
+        ? `บันทึกสูตร "${currentEditingDish.name}" พร้อมซิงค์ราคา ${updatedRmList.length} วัตถุดิบไปยังทุกเมนูที่เกี่ยวข้องแล้ว!`
+        : `บันทึกสูตร "${currentEditingDish.name}" สำเร็จและซิงค์ข้อมูลเรียลไทม์แล้ว!`;
+    showToast(syncMsg);
 };
 
 // -------------------------------------------------------------------------
