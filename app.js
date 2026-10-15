@@ -1017,7 +1017,7 @@ function renderKitchenPrepBoard(container) {
 
     if (viewMode === 'wall-sheet') {
         // High Density Compact Wall Sheet Mode (3-Columns Grid for Wall Mounting)
-        let wallHtml = '<div class="wall-grid grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5">';
+        let wallHtml = '<div class="wall-grid grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 print:grid-cols-3 gap-2.5 print:gap-1.5">';
         dishes.forEach((dish, idx) => {
             const station = getDishStation(dish);
             const isSel = selectedDishIds.has(dish.id);

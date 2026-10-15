@@ -44,27 +44,26 @@
                 width: 100% !important;
             }
             
-            /* High Density 3-Column Wall Grid (Multi-column Flow) for Print */
+            /* High Density 3-Column Wall Grid for Print */
             .wall-grid {
-                display: block !important;
-                column-count: 3 !important;
-                column-gap: 2.5mm !important;
-                column-fill: auto !important;
+                display: grid !important;
+                grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+                gap: calc(2.5mm * var(--print-scale, 1)) !important;
                 width: 100% !important;
                 margin: 0 !important;
                 padding: 0 !important;
-                zoom: var(--print-scale, 1) !important;
             }
             .wall-card {
-                display: inline-block !important;
-                width: 100% !important;
-                margin-bottom: 2.5mm !important;
+                display: flex !important;
+                flex-direction: column !important;
+                justify-content: flex-start !important;
+                align-self: start !important;
                 break-inside: avoid !important;
                 page-break-inside: avoid !important;
                 border: 1px solid #334155 !important;
                 box-shadow: none !important;
                 background: #ffffff !important;
-                padding: 3px 5px !important;
+                padding: calc(3px * var(--print-scale, 1)) calc(5px * var(--print-scale, 1)) !important;
                 border-radius: 4px !important;
                 box-sizing: border-box !important;
                 height: auto !important;
