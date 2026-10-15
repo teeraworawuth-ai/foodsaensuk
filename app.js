@@ -1139,39 +1139,49 @@ function renderKitchenPrepBoard(container) {
         }
 
         const pages = layoutDishesIntoPages(targetDishes);
-        let wallHtml = '<div class="wall-pages-container space-y-6 print:space-y-0">';
+
+        // 1. Screen View: Responsive 1-col on mobile (100% full width, vertical scroll only, no horizontal scroll!), 2-col on md, 3-col on xl
+        const screenHtml = `
+            <div class="screen-wall-view print:hidden space-y-3">
+                ${pages.length > 1 ? `
+                    <div class="bg-blue-50/70 border border-blue-200/80 rounded-xl px-3 py-2 text-xs text-blue-800 flex items-center justify-between">
+                        <span>📄 หากสั่งพิมพ์ตอนนี้ จะจัดลงกระดาษ A4 ได้ <strong>${pages.length} แผ่น</strong> (รวม ${targetDishes.length} เมนู)</span>
+                        <span class="text-[11px] text-blue-600 hidden sm:inline">จัด 3 คอลัมน์แนบชิดอัตโนมัติ</span>
+                    </div>
+                ` : `
+                    <div class="bg-emerald-50/70 border border-emerald-200/80 rounded-xl px-3 py-1.5 text-xs text-emerald-800 flex items-center justify-between">
+                        <span>✅ พอดี <strong>1 แผ่น A4</strong> พอดีสำหรับการพิมพ์ (${targetDishes.length} เมนู)</span>
+                    </div>
+                `}
+                <div class="screen-wall-grid grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5 w-full">
+                    ${targetDishes.map((dish, idx) => generateWallCardHtml(dish, idx, selectedDishIds.has(dish.id))).join('')}
+                </div>
+            </div>
+        `;
+
+        // 2. Print View: High Density 3-Column A4 Paginated Masonry Layout (Active only when printing)
+        let printHtml = '<div class="print-wall-container hidden print:block">';
         pages.forEach((page, pageIdx) => {
-            const pageDishCount = page.cols[0].length + page.cols[1].length + page.cols[2].length;
-            wallHtml += `
-                <div class="wall-page bg-white sm:p-2.5 rounded-2xl border border-slate-200 print:border-none print:p-0 shadow-xs print:shadow-none">
-                    ${pages.length > 1 ? `
-                        <div class="no-print pb-2 mb-2 border-b border-slate-100 flex items-center justify-between text-xs text-slate-500">
-                            <span class="font-bold text-slate-700 flex items-center gap-1.5">
-                                📄 แผ่นพิมพ์ A4 ที่ ${pageIdx + 1} จากทั้งหมด ${pages.length} แผ่น
-                            </span>
-                            <span class="bg-blue-50 text-blue-700 font-bold px-2 py-0.5 rounded-full border border-blue-200 text-[11px]">
-                                รวม ${pageDishCount} เมนูในแผ่นนี้
-                            </span>
+            printHtml += `
+                <div class="wall-page">
+                    <div class="wall-columns">
+                        <div class="wall-col">
+                            ${page.cols[0].map(item => generateWallCardHtml(item.dish, item.globalIdx, selectedDishIds.has(item.dish.id))).join('')}
                         </div>
-                    ` : ''}
-                    <div class="overflow-x-auto pb-1 print:overflow-visible print:pb-0">
-                        <div class="wall-columns flex flex-row min-w-[680px] md:min-w-0 gap-2.5 print:!gap-[2mm] w-full items-start">
-                            <div class="wall-col flex-1 flex flex-col gap-2.5 print:!gap-[2mm] min-w-0">
-                                ${page.cols[0].map(item => generateWallCardHtml(item.dish, item.globalIdx, selectedDishIds.has(item.dish.id))).join('')}
-                            </div>
-                            <div class="wall-col flex-1 flex flex-col gap-2.5 print:!gap-[2mm] min-w-0">
-                                ${page.cols[1].map(item => generateWallCardHtml(item.dish, item.globalIdx, selectedDishIds.has(item.dish.id))).join('')}
-                            </div>
-                            <div class="wall-col flex-1 flex flex-col gap-2.5 print:!gap-[2mm] min-w-0">
-                                ${page.cols[2].map(item => generateWallCardHtml(item.dish, item.globalIdx, selectedDishIds.has(item.dish.id))).join('')}
-                            </div>
+                        <div class="wall-col">
+                            ${page.cols[1].map(item => generateWallCardHtml(item.dish, item.globalIdx, selectedDishIds.has(item.dish.id))).join('')}
+                        </div>
+                        <div class="wall-col">
+                            ${page.cols[2].map(item => generateWallCardHtml(item.dish, item.globalIdx, selectedDishIds.has(item.dish.id))).join('')}
                         </div>
                     </div>
                 </div>
             `;
         });
-        wallHtml += '</div>';
-        container.innerHTML = topControls + wallHtml;
+        printHtml += '</div>';
+
+        container.innerHTML = topControls + screenHtml + printHtml;
+        return;
     } else if (viewMode === 'cards') {
         // Detailed Card View
         let cardsHtml = '<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 md:gap-5 print:grid-cols-2">';
