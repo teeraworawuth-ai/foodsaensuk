@@ -13,6 +13,22 @@ let deliveryMarkupPct = 30; // default +30% for Grab / Lineman
 let showDeliveryPrices = false; // toggle delivery price view
 let currentEditingDish = null; // active in-memory dish being edited
 let currentEditingRawMaterials = {}; // map of { rmId: newDisplayPrice } for global sync
+let printScale = 1.0; // 0.8 to 1.2 print zoom scaling
+
+// Print Scaling Handler (80% - 120%)
+window.setPrintScale = function(val) {
+    const num = parseFloat(val);
+    if (!isNaN(num) && num >= 0.7 && num <= 1.5) {
+        printScale = num;
+        localStorage.setItem('saensuk_print_scale', num);
+        document.documentElement.style.setProperty('--print-scale', num);
+        const content = document.getElementById('main-content');
+        if (content && currentTab === 'prep-board') {
+            renderKitchenPrepBoard(content);
+        }
+        showToast(`ปรับสเกลขนาดพิมพ์เป็น ${Math.round(num * 100)}% แล้ว`);
+    }
+};
 
 // Helper to count how many dishes use a specific raw material
 function getRawMaterialUsageCount(rmId) {
@@ -108,6 +124,11 @@ async function loadData() {
     if (savedMarkup) deliveryMarkupPct = parseFloat(savedMarkup) || 30;
     const savedShowDel = localStorage.getItem('saensuk_show_delivery_prices');
     if (savedShowDel !== null) showDeliveryPrices = (savedShowDel === 'true');
+    const savedScale = localStorage.getItem('saensuk_print_scale');
+    if (savedScale) {
+        printScale = parseFloat(savedScale) || 1.0;
+        document.documentElement.style.setProperty('--print-scale', printScale);
+    }
 
     const saved = localStorage.getItem(`saensuk_food_cost_data_${syncRoomCode}`);
     if (saved) {
@@ -963,6 +984,25 @@ function renderKitchenPrepBoard(container) {
                     </button>
                 </div>
             </div>
+
+            <!-- Print Scale Selector Control -->
+            <div class="mt-2.5 pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div class="flex items-center gap-1.5 flex-wrap">
+                    <span class="font-bold text-slate-700 flex items-center gap-1">
+                        🔍 สเกลขนาดพิมพ์ป้าย (Zoom A4):
+                    </span>
+                    <div class="inline-flex rounded-lg border border-slate-200 p-0.5 bg-slate-100 text-xs">
+                        <button onclick="setPrintScale(0.8)" class="px-2 py-0.5 rounded font-bold transition-all ${printScale === 0.8 ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'}">80% ย่อ</button>
+                        <button onclick="setPrintScale(0.9)" class="px-2 py-0.5 rounded font-bold transition-all ${printScale === 0.9 ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'}">90% กระชับ</button>
+                        <button onclick="setPrintScale(1.0)" class="px-2 py-0.5 rounded font-bold transition-all ${printScale === 1.0 ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'}">100% ปกติ</button>
+                        <button onclick="setPrintScale(1.1)" class="px-2 py-0.5 rounded font-bold transition-all ${printScale === 1.1 ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'}">110% ใหญ่</button>
+                        <button onclick="setPrintScale(1.2)" class="px-2 py-0.5 rounded font-bold transition-all ${printScale === 1.2 ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'}">120% ชัดพิเศษ</button>
+                    </div>
+                </div>
+                <span class="text-[11px] text-slate-400">
+                    💡 ปรับ 90% หรือ 80% หากต้องการดึงเมนูให้เต็มพอดีแผ่น A4 ไม่เหลือเศษหน้า
+                </span>
+            </div>
         </div>
     `;
 
@@ -978,7 +1018,7 @@ function renderKitchenPrepBoard(container) {
     if (viewMode === 'wall-sheet') {
         // High Density Compact Wall Sheet Mode (3-Columns Grid for Wall Mounting)
         let wallHtml = '<div class="wall-grid grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5">';
-        dishes.forEach((dish) => {
+        dishes.forEach((dish, idx) => {
             const station = getDishStation(dish);
             const isSel = selectedDishIds.has(dish.id);
             const activeItems = (dish.items || []).filter(item => !item.disabled);
@@ -987,11 +1027,12 @@ function renderKitchenPrepBoard(container) {
                 <div class="dish-item wall-card bg-white rounded-xl border border-slate-200 p-2.5 shadow-xs flex flex-col justify-between transition-all hover:border-blue-400 break-inside-avoid ${isSel ? 'is-selected-for-print ring-2 ring-blue-500 bg-blue-50/20' : ''}" data-dish-id="${dish.id}">
                     <div>
                         <!-- Header of Wall Card -->
-                        <div class="flex items-center justify-between gap-1.5 border-b border-slate-100 pb-1.5 mb-1.5">
-                            <div class="flex items-center gap-2 min-w-0">
+                        <div class="flex items-center justify-between gap-1.5 border-b border-slate-100 pb-1 mb-1">
+                            <div class="flex items-center gap-1.5 min-w-0">
                                 <label class="cursor-pointer inline-flex items-center no-print" onclick="event.stopPropagation()">
                                     <input type="checkbox" data-dish-id="${dish.id}" onchange="toggleDishSelection('${dish.id}', event)" class="dish-checkbox w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer" ${isSel ? 'checked' : ''}>
                                 </label>
+                                <span class="text-[10px] font-black text-slate-700 bg-slate-100 px-1.5 py-0.2 rounded border border-slate-200 shrink-0">#${idx + 1}</span>
                                 <h4 class="font-black text-slate-900 text-xs md:text-sm truncate">
                                     ${dish.name}
                                 </h4>
@@ -1032,7 +1073,7 @@ function renderKitchenPrepBoard(container) {
                     </div>
 
                     <!-- Footer with Cost Summary & Quick Edit -->
-                    <div class="mt-2 pt-1 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-500">
+                    <div class="mt-1.5 pt-1 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-500">
                         <span>ต้นทุน: <strong class="text-slate-700">${dish.primary_secondary_cost}.-</strong> (${dish.total_cost_pct}%)</span>
                         <button onclick="openDishEditor('${dish.id}')" class="text-blue-600 hover:text-blue-800 font-bold no-print">
                             ✏️ ปรับสเปก

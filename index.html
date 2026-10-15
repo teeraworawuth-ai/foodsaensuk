@@ -15,6 +15,9 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700;800&family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --print-scale: 1;
+        }
         body {
             font-family: 'Prompt', 'Sarabun', sans-serif;
             background-color: #f8fafc;
@@ -22,36 +25,57 @@
         }
         @media print {
             @page {
-                size: A4 landscape;
-                margin: 5mm 6mm;
+                size: A4 portrait;
+                margin: 4mm 4mm;
             }
-            .print-hide, .no-print, header, nav, footer, #category-pills-bar, #batch-toolbar {
+            .print-hide, .no-print, header, nav, footer, #category-pills-bar, #batch-toolbar, #print-header, .print-header {
                 display: none !important;
             }
             body { 
                 background: white !important; 
-                font-size: 8.5pt !important; 
                 padding: 0 !important; 
                 margin: 0 !important;
                 color: #0f172a !important; 
             }
-            .print-header { display: block !important; }
-            .break-inside-avoid { break-inside: avoid !important; page-break-inside: avoid !important; }
+            main {
+                padding: 0 !important;
+                margin: 0 !important;
+                max-width: 100% !important;
+                width: 100% !important;
+            }
             
-            /* High Density 3-Column Wall Grid for Print */
+            /* High Density 3-Column Wall Grid (Multi-column Flow) for Print */
             .wall-grid {
-                display: grid !important;
-                grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
-                gap: 4px !important;
+                display: block !important;
+                column-count: 3 !important;
+                column-gap: 2.5mm !important;
+                column-fill: auto !important;
+                width: 100% !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                zoom: var(--print-scale, 1) !important;
             }
             .wall-card {
+                display: inline-block !important;
+                width: 100% !important;
+                margin-bottom: 2.5mm !important;
                 break-inside: avoid !important;
                 page-break-inside: avoid !important;
-                border: 1.2px solid #334155 !important;
+                border: 1px solid #334155 !important;
                 box-shadow: none !important;
                 background: #ffffff !important;
-                padding: 4px 6px !important;
+                padding: 3px 5px !important;
                 border-radius: 4px !important;
+                box-sizing: border-box !important;
+                height: auto !important;
+                min-height: 0 !important;
+            }
+            .wall-card > div:first-child {
+                display: block !important;
+            }
+            .wall-card > div:last-child {
+                margin-top: 3px !important;
+                padding-top: 2px !important;
             }
             
             /* When printing only selected items */
