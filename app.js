@@ -13,20 +13,14 @@ let deliveryMarkupPct = 30; // default +30% for Grab / Lineman
 let showDeliveryPrices = false; // toggle delivery price view
 let currentEditingDish = null; // active in-memory dish being edited
 let currentEditingRawMaterials = {}; // map of { rmId: newDisplayPrice } for global sync
-let printScale = 1.0; // 0.8 to 1.2 print zoom scaling
+let isPrintingSelectedOnly = false;
+let showOnlySelected = false; // toggle viewing only selected dishes on screen
 
-// Print Scaling Handler (80% - 120%)
-window.setPrintScale = function(val) {
-    const num = parseFloat(val);
-    if (!isNaN(num) && num >= 0.7 && num <= 1.5) {
-        printScale = num;
-        localStorage.setItem('saensuk_print_scale', num);
-        document.documentElement.style.setProperty('--print-scale', num);
-        const content = document.getElementById('main-content');
-        if (content && currentTab === 'prep-board') {
-            renderKitchenPrepBoard(content);
-        }
-        showToast(`ปรับสเกลขนาดพิมพ์เป็น ${Math.round(num * 100)}% แล้ว`);
+window.toggleShowOnlySelected = function(val) {
+    showOnlySelected = typeof val === 'boolean' ? val : !showOnlySelected;
+    const content = document.getElementById('main-content');
+    if (content && currentTab === 'prep-board') {
+        renderKitchenPrepBoard(content);
     }
 };
 
@@ -124,11 +118,6 @@ async function loadData() {
     if (savedMarkup) deliveryMarkupPct = parseFloat(savedMarkup) || 30;
     const savedShowDel = localStorage.getItem('saensuk_show_delivery_prices');
     if (savedShowDel !== null) showDeliveryPrices = (savedShowDel === 'true');
-    const savedScale = localStorage.getItem('saensuk_print_scale');
-    if (savedScale) {
-        printScale = parseFloat(savedScale) || 1.0;
-        document.documentElement.style.setProperty('--print-scale', printScale);
-    }
 
     const saved = localStorage.getItem(`saensuk_food_cost_data_${syncRoomCode}`);
     if (saved) {
@@ -802,7 +791,12 @@ window.selectAllDishes = function() {
 
 window.deselectAllDishes = function() {
     selectedDishIds.clear();
+    showOnlySelected = false;
     updateSelectionUI();
+    const content = document.getElementById('main-content');
+    if (content && currentTab === 'prep-board') {
+        renderKitchenPrepBoard(content);
+    }
     showToast('ล้างการเลือกเมนูทั้งหมดแล้ว', 'info');
 };
 
@@ -869,21 +863,24 @@ window.printSelectedBatch = function() {
         });
     }
 
-    const mainContent = document.getElementById('main-content');
-    if (mainContent) {
-        mainContent.classList.add('printing-selected-only');
+    isPrintingSelectedOnly = true;
+    const content = document.getElementById('main-content');
+    if (content && currentTab === 'prep-board') {
+        renderKitchenPrepBoard(content);
     }
 
     window.print();
 
     setTimeout(() => {
-        if (mainContent) {
-            mainContent.classList.remove('printing-selected-only');
+        isPrintingSelectedOnly = false;
+        if (content && currentTab === 'prep-board') {
+            renderKitchenPrepBoard(content);
         }
-    }, 1500);
+    }, 1200);
 };
 
 window.printAllDishes = function() {
+    isPrintingSelectedOnly = false;
     const badge = document.getElementById('print-batch-badge');
     if (badge) {
         badge.textContent = `ชุดพิมพ์: ทั้งหมด (${appData ? appData.dishes.length : 0} เมนู)`;
@@ -894,12 +891,133 @@ window.printAllDishes = function() {
             year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' 
         });
     }
-    const mainContent = document.getElementById('main-content');
-    if (mainContent) {
-        mainContent.classList.remove('printing-selected-only');
+    const content = document.getElementById('main-content');
+    if (content && currentTab === 'prep-board') {
+        renderKitchenPrepBoard(content);
     }
     window.print();
 };
+
+// Helper to generate a single Wall Card HTML for print/screen
+function generateWallCardHtml(dish, idx, isSel) {
+    const station = getDishStation(dish);
+    const activeItems = (dish.items || []).filter(item => !item.disabled);
+    return `
+        <div class="dish-item wall-card bg-white rounded-xl border border-slate-200 p-2.5 shadow-xs flex flex-col justify-between transition-all hover:border-blue-400 break-inside-avoid ${isSel ? 'is-selected-for-print ring-2 ring-blue-500 bg-blue-50/20' : ''}" data-dish-id="${dish.id}">
+            <div>
+                <!-- Header of Wall Card -->
+                <div class="flex items-center justify-between gap-1.5 border-b border-slate-100 pb-1 mb-1">
+                    <div class="flex items-center gap-1.5 min-w-0">
+                        <label class="cursor-pointer inline-flex items-center no-print" onclick="event.stopPropagation()">
+                            <input type="checkbox" data-dish-id="${dish.id}" onchange="toggleDishSelection('${dish.id}', event)" class="dish-checkbox w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer" ${isSel ? 'checked' : ''}>
+                        </label>
+                        <span class="text-[10px] font-black text-slate-700 bg-slate-100 px-1.5 py-0.2 rounded border border-slate-200 shrink-0">#${idx + 1}</span>
+                        <h4 class="font-black text-slate-900 text-xs md:text-sm truncate">
+                            ${dish.name}
+                        </h4>
+                    </div>
+                    <div class="flex items-center gap-1 shrink-0">
+                        <span class="text-[10px] font-bold px-1.5 py-0.5 rounded border ${station.color}">
+                            ${station.icon} ${station.name}
+                        </span>
+                        <span class="text-xs font-black text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200" title="ราคาขายหน้าร้าน">
+                            ${dish.price}.-
+                        </span>
+                        ${showDeliveryPrices ? `
+                            <span class="text-[11px] font-black text-teal-800 bg-teal-50 px-1.5 py-0.5 rounded border border-teal-300" title="ราคา Grab / Lineman (+${deliveryMarkupPct}%)">
+                                🛵 ${dish.delivery_price}.-
+                            </span>
+                        ` : ''}
+                    </div>
+                </div>
+
+                <!-- Ingredients List with LARGE BOLD Numbers (Only Active Items) -->
+                <div class="space-y-1">
+                    ${activeItems.length > 0 ? activeItems.map(item => {
+                        const pInfo = getProteinColorInfo(item.rm_name);
+                        const actionIcon = item.action === 'ชั่งน้ำหนัก' ? '⚖️' : item.action === 'นับชิ้น' ? '🔢' : '🧪';
+                        return `
+                            <div class="flex items-center justify-between text-[11px] p-1 rounded bg-slate-50 border border-slate-100 border-l-2 ${pInfo.border}">
+                                <span class="truncate font-semibold text-slate-800 pr-1">
+                                    ${item.rm_name}
+                                    ${item.type === 'primary' ? '<span class="text-[9px] text-rose-600 font-bold ml-0.5">(หลัก)</span>' : ''}
+                                </span>
+                                <span class="font-black text-blue-900 shrink-0 text-xs bg-white px-1.5 py-0.2 rounded border border-slate-200">
+                                    ${actionIcon} ${item.portion} <strong class="text-[10px] font-normal text-slate-600">${item.unit}</strong>
+                                </span>
+                            </div>
+                        `;
+                    }).join('') : '<div class="text-[11px] text-slate-400 py-1 text-center font-medium">ไม่มีวัตถุดิบที่เปิดใช้งาน</div>'}
+                </div>
+            </div>
+
+            <!-- Footer with Cost Summary & Quick Edit -->
+            <div class="mt-1.5 pt-1 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-500">
+                <span>ต้นทุน: <strong class="text-slate-700">${dish.primary_secondary_cost}.-</strong> (${dish.total_cost_pct}%)</span>
+                <button onclick="openDishEditor('${dish.id}')" class="text-blue-600 hover:text-blue-800 font-bold no-print">
+                    ✏️ ปรับสเปก
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+// Layout dishes into A4 pages across 3 columns:
+// Round-robin Left-to-Right (Col 1 -> Col 2 -> Col 3 -> Col 1...)
+// Vertical packing hugs the card above tightly (Zero waste height / Masonry)
+// Dynamic tolerance: allows overflow up to 3 ingredient lines before cascading to Col 2, Col 3, then next page
+function layoutDishesIntoPages(dishList) {
+    const BASE_CARD_HEIGHT = 15.0; // mm (header + footer + card padding)
+    const LINE_HEIGHT = 5.3;       // mm (each ingredient row)
+    const CARD_GAP = 2.0;          // mm (vertical gap between cards)
+    const PAGE_HEIGHT_LIMIT = 270.0; // mm (printable height per A4 sheet)
+    const OVERFLOW_TOLERANCE = 3 * LINE_HEIGHT; // ~15.9mm (up to 3 lines overflow allowed per user Rule B)
+    const MAX_COL_CAPACITY = PAGE_HEIGHT_LIMIT + OVERFLOW_TOLERANCE; // ~285.9mm
+
+    function estimateDishHeight(dish) {
+        const activeCount = (dish.items || []).filter(item => !item.disabled).length;
+        const lineCount = activeCount > 0 ? activeCount : 1;
+        return BASE_CARD_HEIGHT + (lineCount * LINE_HEIGHT) + CARD_GAP;
+    }
+
+    const pages = [];
+    let currentPage = {
+        cols: [[], [], []],
+        colHeights: [0, 0, 0]
+    };
+    pages.push(currentPage);
+
+    let nextTargetCol = 0; // round-robin: 0 -> 1 -> 2 -> 0 -> 1 -> 2 ...
+
+    dishList.forEach((dish, idx) => {
+        const h = estimateDishHeight(dish);
+        let placed = false;
+        const candidateCols = [nextTargetCol, (nextTargetCol + 1) % 3, (nextTargetCol + 2) % 3];
+        
+        for (const colIdx of candidateCols) {
+            if (currentPage.colHeights[colIdx] === 0 || (currentPage.colHeights[colIdx] + h <= MAX_COL_CAPACITY)) {
+                currentPage.cols[colIdx].push({ dish, globalIdx: idx });
+                currentPage.colHeights[colIdx] += h;
+                nextTargetCol = (colIdx + 1) % 3;
+                placed = true;
+                break;
+            }
+        }
+        
+        if (!placed) {
+            currentPage = {
+                cols: [[], [], []],
+                colHeights: [0, 0, 0]
+            };
+            pages.push(currentPage);
+            currentPage.cols[0].push({ dish, globalIdx: idx });
+            currentPage.colHeights[0] += h;
+            nextTargetCol = 1;
+        }
+    });
+
+    return pages;
+}
 
 function renderKitchenPrepBoard(container) {
     const dishes = getFilteredDishes();
@@ -972,10 +1090,19 @@ function renderKitchenPrepBoard(container) {
                 </div>
 
                 <!-- Action / Print button -->
-                <div class="flex items-center gap-2 self-end lg:self-auto">
+                <div class="flex items-center gap-2 self-end lg:self-auto flex-wrap">
                     <span class="text-xs font-bold px-2.5 py-1.5 rounded-lg bg-blue-50 text-blue-800 border border-blue-200 whitespace-nowrap">
                         เลือกแล้ว: <strong class="selected-count-badge font-black text-blue-900">${selectedDishIds.size}</strong> เมนู
                     </span>
+                    ${selectedDishIds.size > 0 ? `
+                        <button onclick="toggleShowOnlySelected()" class="px-2.5 py-1.5 text-xs font-bold rounded-xl transition-all whitespace-nowrap ${
+                            showOnlySelected 
+                            ? 'bg-blue-600 text-white shadow-xs' 
+                            : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200'
+                        }">
+                            ${showOnlySelected ? '👁️ ดูทั้งหมด' : '👁️ ดูเฉพาะที่เลือก'}
+                        </button>
+                    ` : ''}
                     <button onclick="printSelectedBatch()" class="print-selected-btn px-3.5 py-1.5 text-xs font-bold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm flex items-center gap-1.5 transition-all whitespace-nowrap ${selectedDishIds.size === 0 ? 'opacity-60' : ''}">
                         🖨️ พิมพ์เฉพาะที่เลือก (<span class="selected-count-badge">${selectedDishIds.size}</span>)
                     </button>
@@ -983,25 +1110,6 @@ function renderKitchenPrepBoard(container) {
                         พิมพ์ทั้งหมด
                     </button>
                 </div>
-            </div>
-
-            <!-- Print Scale Selector Control -->
-            <div class="mt-2.5 pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs">
-                <div class="flex items-center gap-1.5 flex-wrap">
-                    <span class="font-bold text-slate-700 flex items-center gap-1">
-                        🔍 สเกลขนาดพิมพ์ป้าย (Zoom A4):
-                    </span>
-                    <div class="inline-flex rounded-lg border border-slate-200 p-0.5 bg-slate-100 text-xs">
-                        <button onclick="setPrintScale(0.8)" class="px-2 py-0.5 rounded font-bold transition-all ${printScale === 0.8 ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'}">80% ย่อ</button>
-                        <button onclick="setPrintScale(0.9)" class="px-2 py-0.5 rounded font-bold transition-all ${printScale === 0.9 ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'}">90% กระชับ</button>
-                        <button onclick="setPrintScale(1.0)" class="px-2 py-0.5 rounded font-bold transition-all ${printScale === 1.0 ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'}">100% ปกติ</button>
-                        <button onclick="setPrintScale(1.1)" class="px-2 py-0.5 rounded font-bold transition-all ${printScale === 1.1 ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'}">110% ใหญ่</button>
-                        <button onclick="setPrintScale(1.2)" class="px-2 py-0.5 rounded font-bold transition-all ${printScale === 1.2 ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'}">120% ชัดพิเศษ</button>
-                    </div>
-                </div>
-                <span class="text-[11px] text-slate-400">
-                    💡 ปรับ 90% หรือ 80% หากต้องการดึงเมนูให้เต็มพอดีแผ่น A4 ไม่เหลือเศษหน้า
-                </span>
             </div>
         </div>
     `;
@@ -1016,68 +1124,48 @@ function renderKitchenPrepBoard(container) {
     }
 
     if (viewMode === 'wall-sheet') {
-        // High Density Compact Wall Sheet Mode (3-Columns Grid for Wall Mounting)
-        let wallHtml = '<div class="wall-grid grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 print:grid-cols-3 gap-2.5 print:gap-1.5">';
-        dishes.forEach((dish, idx) => {
-            const station = getDishStation(dish);
-            const isSel = selectedDishIds.has(dish.id);
-            const activeItems = (dish.items || []).filter(item => !item.disabled);
+        const targetDishes = (isPrintingSelectedOnly || showOnlySelected) 
+            ? dishes.filter(d => selectedDishIds.has(d.id)) 
+            : dishes;
 
+        if (targetDishes.length === 0) {
+            container.innerHTML = topControls + `
+                <div class="p-12 text-center bg-white rounded-2xl border border-slate-200 text-slate-400">
+                    <p class="text-base font-semibold">ไม่มีรายการเมนูที่เลือกสำหรับแสดงผล</p>
+                    <p class="text-xs mt-1">โปรดติ๊กเลือกเมนูที่ต้องการ หรือกดปุ่ม "ดูทั้งหมด"</p>
+                </div>
+            `;
+            return;
+        }
+
+        const pages = layoutDishesIntoPages(targetDishes);
+        let wallHtml = '<div class="wall-pages-container space-y-6 print:space-y-0">';
+        pages.forEach((page, pageIdx) => {
+            const pageDishCount = page.cols[0].length + page.cols[1].length + page.cols[2].length;
             wallHtml += `
-                <div class="dish-item wall-card bg-white rounded-xl border border-slate-200 p-2.5 shadow-xs flex flex-col justify-between transition-all hover:border-blue-400 break-inside-avoid ${isSel ? 'is-selected-for-print ring-2 ring-blue-500 bg-blue-50/20' : ''}" data-dish-id="${dish.id}">
-                    <div>
-                        <!-- Header of Wall Card -->
-                        <div class="flex items-center justify-between gap-1.5 border-b border-slate-100 pb-1 mb-1">
-                            <div class="flex items-center gap-1.5 min-w-0">
-                                <label class="cursor-pointer inline-flex items-center no-print" onclick="event.stopPropagation()">
-                                    <input type="checkbox" data-dish-id="${dish.id}" onchange="toggleDishSelection('${dish.id}', event)" class="dish-checkbox w-4 h-4 rounded text-blue-600 focus:ring-blue-500 border-slate-300 cursor-pointer" ${isSel ? 'checked' : ''}>
-                                </label>
-                                <span class="text-[10px] font-black text-slate-700 bg-slate-100 px-1.5 py-0.2 rounded border border-slate-200 shrink-0">#${idx + 1}</span>
-                                <h4 class="font-black text-slate-900 text-xs md:text-sm truncate">
-                                    ${dish.name}
-                                </h4>
+                <div class="wall-page bg-white sm:p-2.5 rounded-2xl border border-slate-200 print:border-none print:p-0 shadow-xs print:shadow-none">
+                    ${pages.length > 1 ? `
+                        <div class="no-print pb-2 mb-2 border-b border-slate-100 flex items-center justify-between text-xs text-slate-500">
+                            <span class="font-bold text-slate-700 flex items-center gap-1.5">
+                                📄 แผ่นพิมพ์ A4 ที่ ${pageIdx + 1} จากทั้งหมด ${pages.length} แผ่น
+                            </span>
+                            <span class="bg-blue-50 text-blue-700 font-bold px-2 py-0.5 rounded-full border border-blue-200 text-[11px]">
+                                รวม ${pageDishCount} เมนูในแผ่นนี้
+                            </span>
+                        </div>
+                    ` : ''}
+                    <div class="overflow-x-auto pb-1 print:overflow-visible print:pb-0">
+                        <div class="wall-columns flex flex-row min-w-[680px] md:min-w-0 gap-2.5 print:!gap-[2mm] w-full items-start">
+                            <div class="wall-col flex-1 flex flex-col gap-2.5 print:!gap-[2mm] min-w-0">
+                                ${page.cols[0].map(item => generateWallCardHtml(item.dish, item.globalIdx, selectedDishIds.has(item.dish.id))).join('')}
                             </div>
-                            <div class="flex items-center gap-1 shrink-0">
-                                <span class="text-[10px] font-bold px-1.5 py-0.5 rounded border ${station.color}">
-                                    ${station.icon} ${station.name}
-                                </span>
-                                <span class="text-xs font-black text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200" title="ราคาขายหน้าร้าน">
-                                    ${dish.price}.-
-                                </span>
-                                ${showDeliveryPrices ? `
-                                    <span class="text-[11px] font-black text-teal-800 bg-teal-50 px-1.5 py-0.5 rounded border border-teal-300" title="ราคา Grab / Lineman (+${deliveryMarkupPct}%)">
-                                        🛵 ${dish.delivery_price}.-
-                                    </span>
-                                ` : ''}
+                            <div class="wall-col flex-1 flex flex-col gap-2.5 print:!gap-[2mm] min-w-0">
+                                ${page.cols[1].map(item => generateWallCardHtml(item.dish, item.globalIdx, selectedDishIds.has(item.dish.id))).join('')}
+                            </div>
+                            <div class="wall-col flex-1 flex flex-col gap-2.5 print:!gap-[2mm] min-w-0">
+                                ${page.cols[2].map(item => generateWallCardHtml(item.dish, item.globalIdx, selectedDishIds.has(item.dish.id))).join('')}
                             </div>
                         </div>
-
-                        <!-- Ingredients List with LARGE BOLD Numbers (Only Active Items) -->
-                        <div class="space-y-1">
-                            ${activeItems.length > 0 ? activeItems.map(item => {
-                                const pInfo = getProteinColorInfo(item.rm_name);
-                                const actionIcon = item.action === 'ชั่งน้ำหนัก' ? '⚖️' : item.action === 'นับชิ้น' ? '🔢' : '🧪';
-                                return `
-                                    <div class="flex items-center justify-between text-[11px] p-1 rounded bg-slate-50 border border-slate-100 border-l-2 ${pInfo.border}">
-                                        <span class="truncate font-semibold text-slate-800 pr-1">
-                                            ${item.rm_name}
-                                            ${item.type === 'primary' ? '<span class="text-[9px] text-rose-600 font-bold ml-0.5">(หลัก)</span>' : ''}
-                                        </span>
-                                        <span class="font-black text-blue-900 shrink-0 text-xs bg-white px-1.5 py-0.2 rounded border border-slate-200">
-                                            ${actionIcon} ${item.portion} <strong class="text-[10px] font-normal text-slate-600">${item.unit}</strong>
-                                        </span>
-                                    </div>
-                                `;
-                            }).join('') : '<div class="text-[11px] text-slate-400 py-1 text-center font-medium">ไม่มีวัตถุดิบที่เปิดใช้งาน</div>'}
-                        </div>
-                    </div>
-
-                    <!-- Footer with Cost Summary & Quick Edit -->
-                    <div class="mt-1.5 pt-1 border-t border-slate-100 flex items-center justify-between text-[10px] text-slate-500">
-                        <span>ต้นทุน: <strong class="text-slate-700">${dish.primary_secondary_cost}.-</strong> (${dish.total_cost_pct}%)</span>
-                        <button onclick="openDishEditor('${dish.id}')" class="text-blue-600 hover:text-blue-800 font-bold no-print">
-                            ✏️ ปรับสเปก
-                        </button>
                     </div>
                 </div>
             `;

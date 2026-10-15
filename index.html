@@ -15,9 +15,6 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700;800&family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        :root {
-            --print-scale: 1;
-        }
         body {
             font-family: 'Prompt', 'Sarabun', sans-serif;
             background-color: #f8fafc;
@@ -44,26 +41,49 @@
                 width: 100% !important;
             }
             
-            /* High Density 3-Column Wall Grid for Print */
-            .wall-grid {
-                display: grid !important;
-                grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
-                gap: calc(2.5mm * var(--print-scale, 1)) !important;
+            /* Wall Sheet Multi-Page & 3-Column Architecture */
+            .wall-page {
+                width: 100% !important;
+                box-sizing: border-box !important;
+                page-break-after: always !important;
+                break-after: page !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                border: none !important;
+                box-shadow: none !important;
+            }
+            .wall-page:last-child {
+                page-break-after: auto !important;
+                break-after: auto !important;
+            }
+            .wall-columns {
+                display: flex !important;
+                flex-direction: row !important;
+                gap: 2mm !important;
                 width: 100% !important;
                 margin: 0 !important;
                 padding: 0 !important;
+                align-items: flex-start !important;
+            }
+            .wall-col {
+                flex: 1 1 0% !important;
+                width: 0 !important;
+                min-width: 0 !important;
+                display: flex !important;
+                flex-direction: column !important;
+                gap: 2mm !important;
             }
             .wall-card {
                 display: flex !important;
                 flex-direction: column !important;
                 justify-content: flex-start !important;
-                align-self: start !important;
+                align-self: stretch !important;
                 break-inside: avoid !important;
                 page-break-inside: avoid !important;
                 border: 1px solid #334155 !important;
                 box-shadow: none !important;
                 background: #ffffff !important;
-                padding: calc(3px * var(--print-scale, 1)) calc(5px * var(--print-scale, 1)) !important;
+                padding: 3px 5px !important;
                 border-radius: 4px !important;
                 box-sizing: border-box !important;
                 height: auto !important;
@@ -73,13 +93,8 @@
                 display: block !important;
             }
             .wall-card > div:last-child {
-                margin-top: 3px !important;
-                padding-top: 2px !important;
-            }
-            
-            /* When printing only selected items */
-            .printing-selected-only .dish-item:not(.is-selected-for-print) {
-                display: none !important;
+                margin-top: 2px !important;
+                padding-top: 1px !important;
             }
         }
         /* Mobile safe area padding */
