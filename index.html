@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>ระบบวิเคราะห์ต้นทุนอาหาร & สเปกวัตถุดิบครัวแสนสุข (Live Sync)</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -15,17 +18,27 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700;800&family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
+        html, body {
+            overflow-x: hidden !important;
+            max-width: 100vw !important;
+            width: 100% !important;
+            position: relative;
+        }
         body {
             font-family: 'Prompt', 'Sarabun', sans-serif;
             background-color: #f8fafc;
             -webkit-tap-highlight-color: transparent;
+        }
+        /* Ensure print-only container is strictly hidden on all screens */
+        .print-wall-container {
+            display: none !important;
         }
         @media print {
             @page {
                 size: A4 portrait;
                 margin: 4mm 4mm;
             }
-            .print-hide, .no-print, header, nav, footer, #category-pills-bar, #batch-toolbar, #print-header, .print-header, .screen-wall-grid {
+            .print-hide, .no-print, header, nav, footer, #category-pills-bar, #batch-toolbar, #print-header, .print-header, .screen-wall-view, .screen-wall-grid {
                 display: none !important;
             }
             .print-wall-container {
@@ -310,8 +323,8 @@
         การแจ้งเตือน
     </div>
 
-    <!-- Scripts -->
-    <script src="default_data.js"></script>
-    <script src="app.js"></script>
+    <!-- Scripts with Cache Busting -->
+    <script src="default_data.js?v=20261015_03"></script>
+    <script src="app.js?v=20261015_03"></script>
 </body>
 </html>

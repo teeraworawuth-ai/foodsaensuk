@@ -1090,7 +1090,7 @@ function renderKitchenPrepBoard(container) {
                 </div>
 
                 <!-- Action / Print button -->
-                <div class="flex items-center gap-2 self-end lg:self-auto flex-wrap">
+                <div class="flex items-center gap-2 w-full lg:w-auto justify-start flex-wrap">
                     <span class="text-xs font-bold px-2.5 py-1.5 rounded-lg bg-blue-50 text-blue-800 border border-blue-200 whitespace-nowrap">
                         เลือกแล้ว: <strong class="selected-count-badge font-black text-blue-900">${selectedDishIds.size}</strong> เมนู
                     </span>
