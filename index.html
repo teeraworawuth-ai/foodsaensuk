@@ -18,11 +18,13 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700;800&family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        html, body {
-            overflow-x: hidden !important;
-            max-width: 100vw !important;
-            width: 100% !important;
-            position: relative;
+        @media screen {
+            html, body {
+                overflow-x: hidden !important;
+                max-width: 100vw !important;
+                width: 100% !important;
+                position: relative;
+            }
         }
         body {
             font-family: 'Prompt', 'Sarabun', sans-serif;
@@ -43,23 +45,37 @@
             }
             .print-wall-container {
                 display: block !important;
+                width: 100% !important;
+                max-width: 100% !important;
+                min-width: 100% !important;
+                margin: 0 !important;
+                padding: 0 !important;
             }
-            body { 
+            html, body { 
+                overflow: visible !important;
+                overflow-x: visible !important;
+                width: 100% !important;
+                max-width: 100% !important;
+                min-width: 100% !important;
                 background: white !important; 
                 padding: 0 !important; 
                 margin: 0 !important;
                 color: #0f172a !important; 
             }
-            main {
+            main, #main-content {
                 padding: 0 !important;
                 margin: 0 !important;
                 max-width: 100% !important;
                 width: 100% !important;
+                min-width: 100% !important;
+                box-sizing: border-box !important;
             }
             
             /* Wall Sheet Multi-Page & 3-Column Architecture */
             .wall-page {
                 width: 100% !important;
+                max-width: 100% !important;
+                min-width: 100% !important;
                 box-sizing: border-box !important;
                 page-break-after: always !important;
                 break-after: page !important;
@@ -73,27 +89,31 @@
                 break-after: auto !important;
             }
             .wall-columns {
-                display: flex !important;
-                flex-direction: row !important;
-                gap: 2mm !important;
+                display: grid !important;
+                grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+                gap: 2.5mm !important;
                 width: 100% !important;
+                max-width: 100% !important;
+                min-width: 100% !important;
                 margin: 0 !important;
                 padding: 0 !important;
-                align-items: flex-start !important;
+                box-sizing: border-box !important;
+                align-items: start !important;
             }
             .wall-col {
-                flex: 1 1 0% !important;
-                width: 0 !important;
+                width: 100% !important;
                 min-width: 0 !important;
                 display: flex !important;
                 flex-direction: column !important;
-                gap: 2mm !important;
+                gap: 2.5mm !important;
+                box-sizing: border-box !important;
             }
             .wall-card {
                 display: flex !important;
                 flex-direction: column !important;
                 justify-content: flex-start !important;
                 align-self: stretch !important;
+                width: 100% !important;
                 break-inside: avoid !important;
                 page-break-inside: avoid !important;
                 border: 1px solid #334155 !important;
@@ -324,7 +344,7 @@
     </div>
 
     <!-- Scripts with Cache Busting -->
-    <script src="default_data.js?v=20261015_03"></script>
-    <script src="app.js?v=20261015_03"></script>
+    <script src="default_data.js?v=20261016_01"></script>
+    <script src="app.js?v=20261016_01"></script>
 </body>
 </html>

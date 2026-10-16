@@ -969,7 +969,7 @@ function generateWallCardHtml(dish, idx, isSel) {
 function layoutDishesIntoPages(dishList) {
     const BASE_CARD_HEIGHT = 15.0; // mm (header + footer + card padding)
     const LINE_HEIGHT = 5.3;       // mm (each ingredient row)
-    const CARD_GAP = 2.0;          // mm (vertical gap between cards)
+    const CARD_GAP = 2.5;          // mm (vertical gap between cards, matches CSS gap: 2.5mm)
     const PAGE_HEIGHT_LIMIT = 270.0; // mm (printable height per A4 sheet)
     const OVERFLOW_TOLERANCE = 3 * LINE_HEIGHT; // ~15.9mm (up to 3 lines overflow allowed per user Rule B)
     const MAX_COL_CAPACITY = PAGE_HEIGHT_LIMIT + OVERFLOW_TOLERANCE; // ~285.9mm
