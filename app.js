@@ -274,6 +274,13 @@ function getCloudDelta() {
         }
     });
 
+    const pieceWeights = {};
+    Object.values(appData.raw_materials || {}).forEach(rm => {
+        if (rm.piece_weight > 0 && rm.default_piece_weight) {
+            pieceWeights[rm.id] = rm.piece_weight;
+        }
+    });
+
     return {
         type: 'RETAINED_DELTA_STATE',
         room: syncRoomCode,
@@ -281,6 +288,7 @@ function getCloudDelta() {
         updatedAt: Date.now(),
         last_sync: appData.restaurant_info.last_market_sync,
         customPrices,
+        pieceWeights,
         modifiedDishes
     };
 }
@@ -307,6 +315,16 @@ function applyCloudDelta(delta) {
                 rm.use_custom = true;
                 rm.custom_price = cData.custom_price;
                 rm.custom_price_display = cData.custom_price_display;
+                changed = true;
+            }
+        });
+    }
+
+    if (delta.pieceWeights) {
+        Object.entries(delta.pieceWeights).forEach(([rmId, w]) => {
+            const rm = appData.raw_materials[rmId];
+            if (rm && w > 0 && rm.piece_weight !== w) {
+                rm.piece_weight = w;
                 changed = true;
             }
         });
@@ -563,6 +581,7 @@ function setupEventListeners() {
 // Recalculate costs for all dishes based on current raw material effective prices
 function recalculateAllDishes() {
     if (!appData || !appData.dishes) return;
+    ensurePieceProfiles();
     
     appData.dishes.forEach(dish => {
         let psCost = 0;
@@ -898,6 +917,217 @@ window.printAllDishes = function() {
     window.print();
 };
 
+// -------------------------------------------------------------------------
+// PIECE SIZE ENGINE: countable raw materials (shrimp, crab, wings...) ↔ grams
+// -------------------------------------------------------------------------
+const PIECE_DEFAULTS = {
+    RM_SHRIMP_WHITE:  { w: 22,  u: 'ตัว' },
+    RM_SHRIMP_RIVER:  { w: 75,  u: 'ตัว' },
+    RM_CRAB_BLUE:     { w: 220, u: 'ตัว' },
+    RM_SQUID_ROE:     { w: 190, u: 'ตัว' },
+    RM_GOURAMI:       { w: 155, u: 'ตัว' },
+    RM_CHICKEN_WINGS: { w: 35,  u: 'ชิ้น' },
+    RM_CHICKEN_FEET:  { w: 38,  u: 'ตีน' }
+};
+
+// Attach piece profile (grams per piece) to raw materials; keeps user-edited values
+function ensurePieceProfiles() {
+    if (!appData || !appData.raw_materials) return;
+    Object.entries(PIECE_DEFAULTS).forEach(([id, def]) => {
+        const rm = appData.raw_materials[id];
+        if (!rm) return;
+        rm.default_piece_weight = def.w;
+        rm.piece_unit = def.u;
+        if (!(rm.piece_weight > 0)) rm.piece_weight = def.w;
+    });
+}
+
+// Returns raw material if this dish item is a weighed (g) countable ingredient
+function getPieceRm(item) {
+    if (!item || item.unit !== 'g' || !appData) return null;
+    const rm = appData.raw_materials[item.rm_id];
+    return (rm && rm.piece_weight > 0) ? rm : null;
+}
+
+// 100g of 22g/piece -> "4-5"; 110g -> "5"
+function formatPieces(grams, rm) {
+    const x = grams / rm.piece_weight;
+    let lo = Math.floor(x + 0.05);
+    let hi = Math.ceil(x - 0.05);
+    if (lo < 1) lo = 1;
+    if (hi < lo) hi = lo;
+    return lo === hi ? `${lo}` : `${lo}-${hi}`;
+}
+
+function getEffectivePricePerUnit(rm) {
+    return (rm.use_custom && rm.custom_price !== undefined) ? rm.custom_price : rm.market_price;
+}
+
+let pendingSizeUpdate = null;
+
+// Entry: user typed a new grams-per-piece (or kg + pieces count)
+window.startSizeUpdate = function(rmId, newPW) {
+    const rm = appData.raw_materials[rmId];
+    const w = parseFloat(newPW);
+    if (!rm || isNaN(w) || w < 3 || w > 2000) {
+        showToast('⚠️ ค่าน้ำหนักต่อตัวไม่ถูกต้อง (ต้องอยู่ระหว่าง 3-2000 กรัม)', 'error');
+        renderAll();
+        return;
+    }
+    const nw = Math.round(w * 10) / 10;
+    if (Math.abs(nw - rm.piece_weight) < 0.05) {
+        showToast('ค่าไซส์เท่าเดิม ไม่มีการเปลี่ยนแปลง', 'info');
+        renderAll();
+        return;
+    }
+    pendingSizeUpdate = { rmId, oldPW: rm.piece_weight, newPW: nw, mode: 'keepWeight', selected: new Set() };
+    getSizeAffectedItems(rmId).forEach(x => pendingSizeUpdate.selected.add(x.dish.id));
+    renderSizeUpdateModal();
+};
+
+window.startSizeUpdateFromKg = function(rmId) {
+    const kg = parseFloat((document.getElementById('size-kg-' + rmId) || {}).value);
+    const pcs = parseFloat((document.getElementById('size-pcs-' + rmId) || {}).value);
+    if (isNaN(kg) || isNaN(pcs) || kg <= 0 || pcs <= 0) {
+        showToast('⚠️ กรอกน้ำหนัก (กก.) และจำนวนตัวที่ได้ให้ครบ', 'error');
+        return;
+    }
+    startSizeUpdate(rmId, (kg * 1000) / pcs);
+};
+
+window.resetPieceWeight = function(rmId) {
+    const rm = appData.raw_materials[rmId];
+    if (rm && rm.default_piece_weight) startSizeUpdate(rmId, rm.default_piece_weight);
+};
+
+function getSizeAffectedItems(rmId) {
+    const out = [];
+    (appData.dishes || []).forEach(dish => {
+        (dish.items || []).forEach(item => {
+            if (item.rm_id === rmId && !item.disabled && item.unit === 'g') out.push({ dish, item });
+        });
+    });
+    return out;
+}
+
+function computeNewPortion(item, p) {
+    return p.mode === 'keepPieces' ? Math.max(1, Math.round(item.portion * p.newPW / p.oldPW)) : item.portion;
+}
+
+function renderSizeUpdateModal() {
+    const p = pendingSizeUpdate;
+    if (!p) return;
+    const rm = appData.raw_materials[p.rmId];
+    const unit = rm.piece_unit || 'ตัว';
+    const price = getEffectivePricePerUnit(rm);
+    const affected = getSizeAffectedItems(p.rmId);
+    const fmt = (g, pw) => `${formatPieces(g, { piece_weight: pw })}`;
+
+    const rows = affected.map(({ dish, item }) => {
+        const newG = computeNewPortion(item, p);
+        const checked = p.selected.has(dish.id);
+        const effectiveG = (p.mode === 'keepPieces' && !checked) ? item.portion : newG;
+        const diffCost = Math.round((effectiveG - item.portion) * price * 100) / 100;
+        const diffTxt = diffCost === 0 ? '<span class="text-slate-400">ต้นทุนเท่าเดิม</span>'
+            : `<span class="${diffCost > 0 ? 'text-rose-600' : 'text-emerald-600'} font-bold">${diffCost > 0 ? '+' : ''}${diffCost.toFixed(2)} บ.</span>`;
+        return `
+            <label class="flex items-center gap-2 p-2 rounded-lg border border-slate-200 bg-white text-[11px] cursor-pointer hover:bg-slate-50">
+                <input type="checkbox" ${checked ? 'checked' : ''} onchange="toggleSizeDish('${dish.id}', this.checked)" class="w-4 h-4 rounded text-blue-600" ${p.mode === 'keepWeight' ? 'disabled' : ''} />
+                <span class="font-bold text-slate-800 flex-1 min-w-0 truncate">${dish.name}</span>
+                <span class="text-slate-500 shrink-0">${item.portion}g (${fmt(item.portion, p.oldPW)} ${unit})</span>
+                <span class="text-slate-400 shrink-0">→</span>
+                <span class="font-black text-blue-800 shrink-0">${effectiveG}g (${fmt(effectiveG, p.newPW)} ${unit})</span>
+                <span class="shrink-0 w-16 text-right">${diffTxt}</span>
+            </label>`;
+    }).join('') || '<div class="text-xs text-slate-400 p-3 text-center">ยังไม่มีเมนูที่ใช้วัตถุดิบนี้</div>';
+
+    let overlay = document.getElementById('size-update-modal');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'size-update-modal';
+        overlay.className = 'fixed inset-0 z-[60] bg-slate-900/60 flex items-end sm:items-center justify-center p-0 sm:p-4 print:hidden';
+        document.body.appendChild(overlay);
+    }
+    overlay.innerHTML = `
+        <div class="bg-white w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl max-h-[92vh] flex flex-col">
+            <div class="p-4 border-b border-slate-200">
+                <h3 class="text-base font-black text-slate-900">📏 อัปเดตไซส์ ${rm.name}</h3>
+                <p class="text-xs text-slate-600 mt-1">
+                    เดิม <strong>${p.oldPW} g/${unit}</strong> (≈${Math.round(10000 / p.oldPW) / 10} ${unit}/กก.)
+                    → ใหม่ <strong class="text-blue-700">${p.newPW} g/${unit}</strong> (≈${Math.round(10000 / p.newPW) / 10} ${unit}/กก.)
+                </p>
+            </div>
+            <div class="p-4 overflow-y-auto space-y-3">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                    <label class="p-2.5 rounded-xl border-2 cursor-pointer ${p.mode === 'keepWeight' ? 'border-blue-500 bg-blue-50' : 'border-slate-200'}">
+                        <input type="radio" name="size-mode" ${p.mode === 'keepWeight' ? 'checked' : ''} onchange="setSizeMode('keepWeight')" />
+                        <strong class="ml-1">คงน้ำหนักเดิม (แนะนำ)</strong>
+                        <div class="text-slate-600 mt-0.5">จานได้เนื้อเท่าเดิม ต้นทุนเท่าเดิม จำนวน${unit}ที่ต้องหยิบจะเปลี่ยนตามไซส์</div>
+                    </label>
+                    <label class="p-2.5 rounded-xl border-2 cursor-pointer ${p.mode === 'keepPieces' ? 'border-amber-500 bg-amber-50' : 'border-slate-200'}">
+                        <input type="radio" name="size-mode" ${p.mode === 'keepPieces' ? 'checked' : ''} onchange="setSizeMode('keepPieces')" />
+                        <strong class="ml-1">คงจำนวน${unit}เดิม</strong>
+                        <div class="text-slate-600 mt-0.5">หยิบ${unit}เท่าเดิม น้ำหนักและต้นทุนต่อจานเปลี่ยนตามไซส์ (เลือกเมนูได้)</div>
+                    </label>
+                </div>
+                <div class="text-[11px] font-bold text-slate-700">เมนูที่ใช้วัตถุดิบนี้ (${affected.length} เมนู)</div>
+                <div class="space-y-1.5">${rows}</div>
+            </div>
+            <div class="p-3 border-t border-slate-200 flex flex-col sm:flex-row gap-2 sm:justify-end bg-slate-50 rounded-b-2xl">
+                <button onclick="closeSizeModal()" class="px-3 py-2 text-xs font-bold rounded-xl bg-white border border-slate-300 text-slate-600">ยกเลิก</button>
+                <button onclick="applySizeUpdate('none')" class="px-3 py-2 text-xs font-bold rounded-xl bg-slate-200 text-slate-800">เปลี่ยนไซส์อย่างเดียว (ปรับสเปกเองภายหลัง)</button>
+                <button onclick="applySizeUpdate('selected')" class="px-3 py-2 text-xs font-bold rounded-xl bg-amber-500 text-white">ปรับเฉพาะที่เลือก</button>
+                <button onclick="applySizeUpdate('all')" class="px-3 py-2 text-xs font-bold rounded-xl bg-blue-600 text-white">ปรับอัตโนมัติทุกเมนู</button>
+            </div>
+        </div>`;
+}
+
+window.setSizeMode = function(mode) {
+    if (!pendingSizeUpdate) return;
+    pendingSizeUpdate.mode = mode;
+    renderSizeUpdateModal();
+};
+
+window.toggleSizeDish = function(dishId, checked) {
+    if (!pendingSizeUpdate) return;
+    if (checked) pendingSizeUpdate.selected.add(dishId); else pendingSizeUpdate.selected.delete(dishId);
+    renderSizeUpdateModal();
+};
+
+window.closeSizeModal = function() {
+    pendingSizeUpdate = null;
+    const el = document.getElementById('size-update-modal');
+    if (el) el.remove();
+    renderAll();
+};
+
+window.applySizeUpdate = function(scope) {
+    const p = pendingSizeUpdate;
+    if (!p) return;
+    const rm = appData.raw_materials[p.rmId];
+    let changedDishes = 0;
+    if (p.mode === 'keepPieces' && scope !== 'none') {
+        getSizeAffectedItems(p.rmId).forEach(({ dish, item }) => {
+            if (scope === 'all' || p.selected.has(dish.id)) {
+                item.portion = computeNewPortion(item, p);
+                dish.is_customized = true;
+                changedDishes++;
+            }
+        });
+    }
+    rm.piece_weight = p.newPW;
+    pendingSizeUpdate = null;
+    const el = document.getElementById('size-update-modal');
+    if (el) el.remove();
+    recalculateAllDishes();
+    saveData(true);
+    renderAll();
+    publishCloudDelta();
+    showToast(changedDishes > 0
+        ? `📏 อัปเดตไซส์ ${rm.name} และปรับสเปก ${changedDishes} เมนูแล้ว`
+        : `📏 อัปเดตไซส์ ${rm.name} เป็น ${p.newPW} g/${rm.piece_unit || 'ตัว'} แล้ว (จำนวนตัวบนป้ายครัวปรับให้อัตโนมัติ)`);
+};
+
 // Helper to generate a single Wall Card HTML for print/screen
 function generateWallCardHtml(dish, idx, isSel) {
     const station = getDishStation(dish);
@@ -935,7 +1165,11 @@ function generateWallCardHtml(dish, idx, isSel) {
                 <div class="space-y-1">
                     ${activeItems.length > 0 ? activeItems.map(item => {
                         const pInfo = getProteinColorInfo(item.rm_name);
-                        const actionIcon = item.action === 'ชั่งน้ำหนัก' ? '⚖️' : item.action === 'นับชิ้น' ? '🔢' : '🧪';
+                        const pieceRm = getPieceRm(item);
+                        const actionIcon = pieceRm ? '🔢' : (item.action === 'ชั่งน้ำหนัก' ? '⚖️' : item.action === 'นับชิ้น' ? '🔢' : '🧪');
+                        const portionHtml = pieceRm
+                            ? `${actionIcon} ${formatPieces(item.portion, pieceRm)} <strong class="text-[10px] font-normal text-slate-600">${pieceRm.piece_unit || 'ตัว'}</strong> <span class="text-[9px] font-normal text-slate-500">(~${item.portion}g)</span>`
+                            : `${actionIcon} ${item.portion} <strong class="text-[10px] font-normal text-slate-600">${item.unit}</strong>`;
                         return `
                             <div class="flex items-center justify-between text-[11px] p-1 rounded bg-slate-50 border border-slate-100 border-l-2 ${pInfo.border}">
                                 <span class="truncate font-semibold text-slate-800 pr-1">
@@ -943,7 +1177,7 @@ function generateWallCardHtml(dish, idx, isSel) {
                                     ${item.type === 'primary' ? '<span class="text-[9px] text-rose-600 font-bold ml-0.5">(หลัก)</span>' : ''}
                                 </span>
                                 <span class="font-black text-blue-900 shrink-0 text-xs bg-white px-1.5 py-0.2 rounded border border-slate-200">
-                                    ${actionIcon} ${item.portion} <strong class="text-[10px] font-normal text-slate-600">${item.unit}</strong>
+                                    ${portionHtml}
                                 </span>
                             </div>
                         `;
@@ -1634,12 +1868,22 @@ function renderModalItemsListHtml() {
                             <span class="text-blue-700 font-bold">${item.action}</span>
                         </div>
                         <div class="flex items-center gap-1.5">
-                            <input type="number" step="any" min="0" value="${item.portion}" 
+                            <input type="number" step="any" min="0" value="${item.portion}" data-portion-input="${idx}"
                                 oninput="onModalPortionChange(${idx}, this.value)" 
                                 ${isDisabled ? 'disabled' : ''}
                                 class="w-full text-xs font-black p-1.5 border border-slate-300 rounded-lg bg-white focus:ring-1 focus:ring-blue-500 focus:outline-none" />
                             <span class="text-xs font-bold text-slate-600 shrink-0 w-8">${item.unit}</span>
                         </div>
+                        ${getPieceRm(item) ? `
+                            <div class="mt-1.5 flex items-center gap-1.5 text-[11px] text-slate-600">
+                                <span class="modal-piece-hint font-bold text-blue-800" data-piece-hint="${idx}">≈ ${formatPieces(item.portion, getPieceRm(item))} ${getPieceRm(item).piece_unit || 'ตัว'}</span>
+                                <span class="text-slate-400">(${getPieceRm(item).piece_weight} g/${getPieceRm(item).piece_unit || 'ตัว'})</span>
+                                <span class="ml-auto">ใส่เป็น${getPieceRm(item).piece_unit || 'ตัว'}:</span>
+                                <input type="number" step="any" min="0" placeholder="จำนวน" ${isDisabled ? 'disabled' : ''}
+                                    oninput="onModalPieceInput(${idx}, this.value)"
+                                    class="w-16 text-center text-xs font-bold p-1 border border-slate-300 rounded-lg bg-white" />
+                            </div>
+                        ` : ''}
                     </div>
 
                     <!-- Column 2: Purchase Price per Unit (Global Sync) -->
@@ -1913,9 +2157,24 @@ window.onModalPortionChange = function(idx, val) {
     if (!currentEditingDish || !currentEditingDish.items[idx]) return;
     const p = parseFloat(val);
     currentEditingDish.items[idx].portion = isNaN(p) ? 0 : p;
+    const pr = getPieceRm(currentEditingDish.items[idx]);
+    const hint = document.querySelector(`[data-piece-hint="${idx}"]`);
+    if (pr && hint) hint.textContent = `≈ ${formatPieces(currentEditingDish.items[idx].portion, pr)} ${pr.piece_unit || 'ตัว'}`;
     calculateModalPreview();
     updateModalKPIBanner();
     updateRowCostDisplay(idx);
+};
+
+// Enter portion as piece count -> converts to grams using current piece weight
+window.onModalPieceInput = function(idx, val) {
+    if (!currentEditingDish || !currentEditingDish.items[idx]) return;
+    const n = parseFloat(val);
+    const pr = getPieceRm(currentEditingDish.items[idx]);
+    if (!pr || isNaN(n) || n < 0) return;
+    const grams = Math.round(n * pr.piece_weight);
+    const input = document.querySelector(`[data-portion-input="${idx}"]`);
+    if (input) input.value = grams;
+    onModalPortionChange(idx, grams);
 };
 
 // Handle Raw Material Purchase Price changes inline (Global Sync Cascade)
@@ -2187,6 +2446,7 @@ function renderMarketPriceManager(container) {
                         <th class="p-3 text-right">ราคาตั้งเอง (หน้าร้าน)</th>
                         <th class="p-3 text-center">ตัวเลือกที่ใช้</th>
                         <th class="p-3 text-right">ราคาที่ใช้คำนวณ</th>
+                        <th class="p-3">ไซส์ตัว/ชิ้น (น้ำหนักต่อตัว)</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-100">
@@ -2236,6 +2496,22 @@ function renderMarketPriceManager(container) {
                 </td>
                 <td class="p-3 text-right font-black text-blue-700 whitespace-nowrap">
                     ${effectiveDisplay}.- <span class="text-[10px] font-normal text-slate-500">/ ${rm.display_unit}</span>
+                </td>
+                <td class="p-3 whitespace-nowrap">
+                    ${rm.piece_weight > 0 ? `
+                        <div class="text-[11px] font-black text-slate-800">≈ ${Math.round(10000 / rm.piece_weight) / 10} ${rm.piece_unit || 'ตัว'}/กก.
+                            <span class="font-normal text-slate-500">(${rm.piece_weight} g/${rm.piece_unit || 'ตัว'}${rm.piece_weight !== rm.default_piece_weight ? ' • ปรับแล้ว' : ''})</span></div>
+                        <div class="flex items-center gap-1 mt-1 text-[10px] text-slate-600">
+                            ชั่ง <input id="size-kg-${rm.id}" type="number" step="any" min="0" value="1" class="w-12 text-center p-1 border border-slate-300 rounded bg-slate-50" /> กก. ได้
+                            <input id="size-pcs-${rm.id}" type="number" step="any" min="0" placeholder="จำนวน" class="w-14 text-center p-1 border border-slate-300 rounded bg-slate-50" /> ${rm.piece_unit || 'ตัว'}
+                            <button onclick="startSizeUpdateFromKg('${rm.id}')" class="px-2 py-1 rounded bg-blue-600 text-white font-bold">อัปเดตไซส์</button>
+                        </div>
+                        <div class="flex items-center gap-1 mt-1 text-[10px] text-slate-600">
+                            หรือกรอก g/${rm.piece_unit || 'ตัว'}:
+                            <input type="number" step="any" min="0" value="${rm.piece_weight}" onchange="startSizeUpdate('${rm.id}', this.value)" class="w-14 text-center p-1 border border-slate-300 rounded bg-slate-50" />
+                            ${rm.piece_weight !== rm.default_piece_weight ? `<button onclick="resetPieceWeight('${rm.id}')" class="px-2 py-1 rounded bg-slate-200 text-slate-700 font-bold">คืนค่ามาตรฐาน ${rm.default_piece_weight}g</button>` : ''}
+                        </div>
+                    ` : '<span class="text-slate-300">-</span>'}
                 </td>
             </tr>
         `;
