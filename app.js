@@ -269,7 +269,8 @@ function getCloudDelta() {
         if (dish.is_customized) {
             modifiedDishes[dish.id] = {
                 items: dish.items,
-                price: dish.price
+                price: dish.price,
+                updated_at: dish.updated_at
             };
         }
     });
@@ -336,6 +337,7 @@ function applyCloudDelta(delta) {
             if (dish) {
                 if (dData.items) dish.items = dData.items;
                 if (dData.price) dish.price = dData.price;
+                if (dData.updated_at) dish.updated_at = dData.updated_at;
                 dish.is_customized = true;
                 changed = true;
             }
@@ -778,6 +780,8 @@ function renderCurrentTab() {
         renderMarketPriceManager(content);
     } else if (currentTab === 'ref-gallery') {
         renderReferenceGallery(content);
+    } else if (currentTab === 'count-items') {
+        renderCountItemsManager(content);
     }
 }
 
@@ -1111,6 +1115,7 @@ window.applySizeUpdate = function(scope) {
             if (scope === 'all' || p.selected.has(dish.id)) {
                 item.portion = computeNewPortion(item, p);
                 dish.is_customized = true;
+                markDishUpdated(dish);
                 changedDishes++;
             }
         });
@@ -1127,6 +1132,192 @@ window.applySizeUpdate = function(scope) {
         ? `📏 อัปเดตไซส์ ${rm.name} และปรับสเปก ${changedDishes} เมนูแล้ว`
         : `📏 อัปเดตไซส์ ${rm.name} เป็น ${p.newPW} g/${rm.piece_unit || 'ตัว'} แล้ว (จำนวนตัวบนป้ายครัวปรับให้อัตโนมัติ)`);
 };
+
+// -------------------------------------------------------------------------
+// COST BAND ALERTS (target 30%-36% of normal price) & RECENT UPDATES
+// -------------------------------------------------------------------------
+const COST_PCT_LOW = 30;
+const COST_PCT_HIGH = 36;
+const RECENT_DAYS = 7;
+
+function getCostAlertDishes() {
+    return (appData.dishes || []).filter(d => d.total_cost_pct < COST_PCT_LOW || d.total_cost_pct > COST_PCT_HIGH);
+}
+
+function getRecentUpdatedDishes() {
+    const since = Date.now() - RECENT_DAYS * 86400000;
+    return (appData.dishes || []).filter(d => d.updated_at && d.updated_at >= since);
+}
+
+function markDishUpdated(dish) {
+    dish.updated_at = Date.now();
+}
+
+function buildCostAlertBanner() {
+    const alerts = getCostAlertDishes();
+    if (alerts.length === 0) {
+        return `<div class="print:hidden mb-4 px-3 py-2 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800">✅ ทุกเมนูมีต้นทุนอยู่ในเกณฑ์ ${COST_PCT_LOW}-${COST_PCT_HIGH}% ของราคาขาย</div>`;
+    }
+    const high = alerts.filter(d => d.total_cost_pct > COST_PCT_HIGH);
+    const low = alerts.filter(d => d.total_cost_pct < COST_PCT_LOW);
+    const row = d => {
+        const isHigh = d.total_cost_pct > COST_PCT_HIGH;
+        return `
+            <div class="flex items-center gap-2 p-1.5 rounded-lg bg-white border border-slate-200 text-[11px]">
+                <span class="shrink-0 font-black px-1.5 py-0.5 rounded ${isHigh ? 'bg-rose-100 text-rose-700' : 'bg-sky-100 text-sky-700'}">${isHigh ? '🔺 สูง' : '🔻 ต่ำ'} ${d.total_cost_pct}%</span>
+                <span class="font-bold text-slate-800 flex-1 min-w-0 truncate">${d.name}</span>
+                <span class="text-slate-500 shrink-0">ขาย ${d.price}.- / ต้นทุน ${d.total_cost}.-</span>
+                <button onclick="openDishEditor('${d.id}')" class="shrink-0 px-2 py-1 rounded-lg bg-blue-600 text-white font-bold">✏️ ปรับสเปก</button>
+            </div>`;
+    };
+    return `
+        <details class="print:hidden mb-4 bg-amber-50 border border-amber-300 rounded-2xl p-3">
+            <summary class="cursor-pointer text-xs font-bold text-amber-900">
+                ⚠️ ${alerts.length} เมนูมีต้นทุนนอกเกณฑ์ ${COST_PCT_LOW}-${COST_PCT_HIGH}% (สูงเกิน ${high.length} • ต่ำกว่า ${low.length}) — แตะเพื่อดูรายการและปรับสเปก
+            </summary>
+            <div class="mt-2 space-y-1.5 max-h-80 overflow-y-auto">
+                ${high.concat(low).map(row).join('')}
+            </div>
+        </details>`;
+}
+
+window.selectRecentUpdatedDishes = function() {
+    const list = getRecentUpdatedDishes();
+    if (list.length === 0) {
+        showToast(`ยังไม่มีเมนูที่แก้ไข/อัปเดตในรอบ ${RECENT_DAYS} วันล่าสุด`, 'info');
+        return;
+    }
+    selectedDishIds.clear();
+    list.forEach(d => selectedDishIds.add(d.id));
+    showOnlySelected = true;
+    renderAll();
+    showToast(`🕒 เลือก ${list.length} เมนูที่อัปเดตล่าสุดแล้ว กด "พิมพ์เฉพาะที่เลือก" ได้เลย`);
+};
+
+window.selectCostAlertDishes = function() {
+    const list = getCostAlertDishes();
+    if (list.length === 0) {
+        showToast('ไม่มีเมนูที่ต้นทุนนอกเกณฑ์', 'info');
+        return;
+    }
+    selectedDishIds.clear();
+    list.forEach(d => selectedDishIds.add(d.id));
+    showOnlySelected = true;
+    renderAll();
+    showToast(`⚠️ เลือก ${list.length} เมนูที่ต้นทุนนอกเกณฑ์แล้ว`);
+};
+
+// -------------------------------------------------------------------------
+// TAB 5: Countable / indivisible ingredients (ตัว / ชิ้น / ฟอง / หลอด / ซอง)
+// -------------------------------------------------------------------------
+const UNIT_SOLD_RM_UNITS = ['ตัว', 'ฟอง', 'หลอด', 'ซอง'];
+
+function renderCountItemsManager(container) {
+    const rms = Object.values(appData.raw_materials);
+    const weighed = rms.filter(rm => rm.piece_weight > 0);
+    const unitSold = rms.filter(rm => UNIT_SOLD_RM_UNITS.includes(rm.unit));
+
+    const menusUsing = (rmId) => {
+        const out = [];
+        (appData.dishes || []).forEach(d => {
+            (d.items || []).forEach(it => {
+                if (it.rm_id === rmId && !it.disabled) out.push({ dish: d, item: it });
+            });
+        });
+        return out;
+    };
+
+    const menuList = (rm, list) => list.length === 0 ? '' : `
+        <details class="mt-2">
+            <summary class="cursor-pointer text-[11px] font-bold text-blue-700">ใช้ใน ${list.length} เมนู (ดูรายการ)</summary>
+            <div class="mt-1.5 space-y-1 max-h-56 overflow-y-auto">
+                ${list.map(({ dish, item }) => {
+                    const pr = getPieceRm(item);
+                    const qty = pr ? `${formatPieces(item.portion, pr)} ${pr.piece_unit || 'ตัว'} (~${item.portion}g)` : `${item.portion} ${item.unit}`;
+                    const out = dish.total_cost_pct > COST_PCT_HIGH || dish.total_cost_pct < COST_PCT_LOW;
+                    return `
+                    <div class="flex items-center gap-2 text-[11px] p-1 rounded bg-slate-50 border border-slate-100">
+                        <span class="font-semibold text-slate-800 flex-1 min-w-0 truncate">${dish.name}</span>
+                        <span class="text-slate-600 shrink-0">${qty}</span>
+                        <span class="shrink-0 font-bold ${out ? 'text-rose-600' : 'text-emerald-700'}">${dish.total_cost_pct}%</span>
+                        <button onclick="openDishEditor('${dish.id}')" class="shrink-0 text-blue-600 font-bold">✏️</button>
+                    </div>`;
+                }).join('')}
+            </div>
+        </details>`;
+
+    let html = `
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-xs p-4 md:p-5 mb-4">
+            <h2 class="text-lg md:text-xl font-bold text-slate-800">🔢 วัตถุดิบนับชิ้น / ตัว / แบ่งไม่ได้</h2>
+            <p class="text-xs text-slate-500 mt-1">
+                ตรวจสอบกับของจริงที่รับเข้าและอัปเดตได้ตลอด — เมื่อเปลี่ยนไซส์หรือราคา ระบบจะคำนวณต้นทุนทุกเมนูที่เกี่ยวข้องใหม่ทันที
+                และเสนอให้ปรับสเปกตามสัดส่วนต้นทุนเดิม
+            </p>
+        </div>
+        <h3 class="text-sm font-black text-slate-800 mb-2">🦐 ซื้อเป็นกิโล แต่ครัวนับเป็นตัว/ชิ้น (${weighed.length} รายการ)</h3>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-6">`;
+
+    weighed.forEach(rm => {
+        const unit = rm.piece_unit || 'ตัว';
+        const price = getEffectivePricePerUnit(rm);
+        const costPerPiece = Math.round(price * rm.piece_weight * 100) / 100;
+        const list = menusUsing(rm.id).filter(x => x.item.unit === 'g');
+        const changed = rm.piece_weight !== rm.default_piece_weight;
+        html += `
+            <div class="bg-white rounded-2xl border border-slate-200 p-3 shadow-xs">
+                <div class="flex items-start justify-between gap-2">
+                    <div class="min-w-0">
+                        <div class="font-black text-slate-900 text-sm">${rm.name}</div>
+                        <div class="text-[11px] text-slate-500 mt-0.5">ราคาที่ใช้ ${Math.round(price * 1000 * 100) / 100}.-/กก. • ต้นทุน ${costPerPiece.toFixed(2)} บ./${unit}</div>
+                    </div>
+                    <div class="text-right shrink-0">
+                        <div class="text-base font-black text-blue-800">${rm.piece_weight} g/${unit}</div>
+                        <div class="text-[11px] text-slate-500">≈ ${Math.round(10000 / rm.piece_weight) / 10} ${unit}/กก.${changed ? ' • ปรับแล้ว' : ''}</div>
+                    </div>
+                </div>
+                <div class="mt-2 p-2 rounded-xl bg-slate-50 border border-slate-100 space-y-1.5 text-[11px] text-slate-600">
+                    <div class="flex items-center gap-1 flex-wrap">
+                        ชั่ง <input id="size-kg-${rm.id}" type="number" step="any" min="0" value="1" class="w-14 text-center p-1 border border-slate-300 rounded bg-white" /> กก. ได้
+                        <input id="size-pcs-${rm.id}" type="number" step="any" min="0" placeholder="จำนวน" class="w-16 text-center p-1 border border-slate-300 rounded bg-white" /> ${unit}
+                        <button onclick="startSizeUpdateFromKg('${rm.id}')" class="px-2 py-1 rounded bg-blue-600 text-white font-bold">อัปเดตไซส์</button>
+                    </div>
+                    <div class="flex items-center gap-1 flex-wrap">
+                        หรือกรอก g/${unit}:
+                        <input type="number" step="any" min="0" value="${rm.piece_weight}" onchange="startSizeUpdate('${rm.id}', this.value)" class="w-16 text-center p-1 border border-slate-300 rounded bg-white" />
+                        ${changed ? `<button onclick="resetPieceWeight('${rm.id}')" class="px-2 py-1 rounded bg-slate-200 text-slate-700 font-bold">คืนค่ามาตรฐาน ${rm.default_piece_weight}g</button>` : ''}
+                    </div>
+                </div>
+                ${menuList(rm, list)}
+            </div>`;
+    });
+
+    html += `</div>
+        <h3 class="text-sm font-black text-slate-800 mb-2">🥚 ขายเป็นหน่วย แบ่งไม่ได้ (${unitSold.length} รายการ)</h3>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">`;
+
+    unitSold.forEach(rm => {
+        const useCustom = rm.use_custom === true;
+        const val = useCustom && rm.custom_price_display !== undefined ? rm.custom_price_display : rm.display_price;
+        const list = menusUsing(rm.id);
+        const outCount = list.filter(x => x.dish.total_cost_pct > COST_PCT_HIGH || x.dish.total_cost_pct < COST_PCT_LOW).length;
+        html += `
+            <div class="bg-white rounded-2xl border border-slate-200 p-3 shadow-xs">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0">
+                        <div class="font-black text-slate-900 text-sm">${rm.name}</div>
+                        <div class="text-[11px] text-slate-500 mt-0.5">หน่วยนับ: ${rm.unit} • ใช้ใน ${list.length} เมนู${outCount ? ` • <span class="text-rose-600 font-bold">นอกเกณฑ์ ${outCount} เมนู</span>` : ''}</div>
+                    </div>
+                    <div class="flex items-center gap-1 shrink-0 text-[11px] text-slate-600">
+                        <input type="number" step="any" min="0" value="${val}" onchange="updateCustomPrice('${rm.id}', this.value)" class="w-20 text-right p-1.5 text-xs font-bold border border-slate-300 rounded-lg bg-slate-50" />
+                        บ./${rm.unit}
+                    </div>
+                </div>
+                ${menuList(rm, list)}
+            </div>`;
+    });
+    html += '</div>';
+    container.innerHTML = html;
+}
 
 // Helper to generate a single Wall Card HTML for print/screen
 function generateWallCardHtml(dish, idx, isSel) {
@@ -1153,6 +1344,8 @@ function generateWallCardHtml(dish, idx, isSel) {
                         <span class="text-xs font-black text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200" title="ราคาขายหน้าร้าน">
                             ${dish.price}.-
                         </span>
+                        ${(dish.total_cost_pct > COST_PCT_HIGH || dish.total_cost_pct < COST_PCT_LOW) ? `<span class="no-print text-[10px] font-black px-1.5 py-0.5 rounded border ${dish.total_cost_pct > COST_PCT_HIGH ? 'bg-rose-50 text-rose-700 border-rose-300' : 'bg-sky-50 text-sky-700 border-sky-300'}" title="ต้นทุนนอกเกณฑ์ ${COST_PCT_LOW}-${COST_PCT_HIGH}%">⚠️ ${dish.total_cost_pct}%</span>` : ''}
+                        ${(dish.updated_at && dish.updated_at >= Date.now() - RECENT_DAYS * 86400000) ? '<span class="no-print text-[10px] font-black px-1 py-0.5 rounded bg-violet-50 text-violet-700 border border-violet-200">🆕</span>' : ''}
                         ${showDeliveryPrices ? `
                             <span class="text-[11px] font-black text-teal-800 bg-teal-50 px-1.5 py-0.5 rounded border border-teal-300" title="ราคา Grab / Lineman (+${deliveryMarkupPct}%)">
                                 🛵 ${dish.delivery_price}.-
@@ -1314,6 +1507,12 @@ function renderKitchenPrepBoard(container) {
                     <button onclick="selectStationDishes('omelet', 'เตาไข่')" class="px-2.5 py-1 rounded-lg bg-yellow-50 hover:bg-yellow-100 text-yellow-800 border border-yellow-200 font-semibold transition-all">
                         🍳 เตาไข่ (${omeletCount})
                     </button>
+                    <button onclick="selectRecentUpdatedDishes()" class="px-2.5 py-1 rounded-lg bg-violet-50 hover:bg-violet-100 text-violet-800 border border-violet-200 font-semibold transition-all">
+                        🕒 อัปเดตล่าสุด (${getRecentUpdatedDishes().length})
+                    </button>
+                    <button onclick="selectCostAlertDishes()" class="px-2.5 py-1 rounded-lg bg-orange-50 hover:bg-orange-100 text-orange-800 border border-orange-200 font-semibold transition-all">
+                        ⚠️ ต้นทุนนอกเกณฑ์ (${getCostAlertDishes().length})
+                    </button>
                     <span class="text-slate-300">|</span>
                     <button onclick="selectAllDishes()" class="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium">
                         ☑️ ทั้งหมด
@@ -1346,7 +1545,7 @@ function renderKitchenPrepBoard(container) {
                 </div>
             </div>
         </div>
-    `;
+    ` + buildCostAlertBanner();
 
     if (dishes.length === 0) {
         container.innerHTML = topControls + `
@@ -2381,6 +2580,7 @@ window.saveDishEditor = function(dishId) {
     const dishIndex = appData.dishes.findIndex(d => d.id === dishId);
     if (dishIndex !== -1) {
         currentEditingDish.is_customized = true;
+        markDishUpdated(currentEditingDish);
         appData.dishes[dishIndex] = JSON.parse(JSON.stringify(currentEditingDish));
     }
 
