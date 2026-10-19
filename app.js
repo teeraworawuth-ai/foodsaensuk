@@ -1136,7 +1136,7 @@ window.applySizeUpdate = function(scope) {
 // -------------------------------------------------------------------------
 // COST BAND ALERTS (target 30%-36% of normal price) & RECENT UPDATES
 // -------------------------------------------------------------------------
-const COST_PCT_LOW = 30;
+const COST_PCT_LOW = 27;
 const COST_PCT_HIGH = 36;
 const RECENT_DAYS = 7;
 
