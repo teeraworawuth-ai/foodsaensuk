@@ -13,6 +13,14 @@
     <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
     <!-- QRCode Generator for Mobile Sharing -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <!-- Firebase (shared ingredient catalog + purchase bills with Smart-Stocks) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { initializeFirestore, memoryLocalCache, doc, collection, onSnapshot, setDoc, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        window.FirebaseAPI = { initializeApp, initializeFirestore, memoryLocalCache, doc, collection, onSnapshot, setDoc, writeBatch, getAuth, signInAnonymously, onAuthStateChanged };
+    </script>
     <!-- Google Fonts: Sarabun & Prompt -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -186,7 +194,7 @@
                         📱 แชร์ QR Code สู่มือถือ
                     </button>
                     <button id="sync-market-btn" class="px-3 py-1.5 text-xs font-bold rounded-lg bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 shadow-xs flex items-center gap-1.5 transition-all">
-                        🔄 อัปเดตราคา 7 วัน
+                        🧾 รายการซื้อ / ราคาจริง
                     </button>
                     <button id="print-btn" class="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs flex items-center gap-1.5 transition-all">
                         🖨️ พิมพ์ใบครัว
@@ -234,6 +242,9 @@
                 </button>
                 <button data-tab="market-prices" class="nav-tab px-4 py-2.5 text-xs font-bold border-b-2 border-transparent text-slate-600 hover:text-slate-900 whitespace-nowrap transition-all">
                     🏷️ ฐานข้อมูลราคาตลาด 7 วัน & ปรับต้นทุน (Market Prices)
+                </button>
+                <button data-tab="purchases" class="nav-tab px-4 py-2.5 text-xs font-bold border-b-2 border-transparent text-slate-600 hover:text-slate-900 whitespace-nowrap transition-all">
+                    🧾 รายการซื้อ (ราคาจริง) <span class="purchases-badge hidden ml-1 px-1.5 rounded-full bg-rose-600 text-white text-[10px]"></span>
                 </button>
                 <button data-tab="count-items" class="nav-tab px-4 py-2.5 text-xs font-bold border-b-2 border-transparent text-slate-600 hover:text-slate-900 whitespace-nowrap transition-all">
                     🔢 วัตถุดิบนับชิ้น/ตัว (Count Items)
@@ -319,6 +330,11 @@
             <span class="text-xl">🏷️</span>
             <span class="text-[10px]">ราคาตลาด</span>
         </button>
+        <button data-tab="purchases" class="mobile-nav-btn relative flex flex-col items-center gap-0.5 text-slate-400">
+            <span class="text-xl">🧾</span>
+            <span class="text-[10px]">ซื้อ</span>
+            <span class="purchases-badge hidden absolute -top-1 right-0 px-1 rounded-full bg-rose-600 text-white text-[9px] leading-tight"></span>
+        </button>
         <button data-tab="count-items" class="mobile-nav-btn flex flex-col items-center gap-0.5 text-slate-400">
             <span class="text-xl">🔢</span>
             <span class="text-[10px]">นับชิ้น</span>
@@ -351,7 +367,8 @@
     </div>
 
     <!-- Scripts with Cache Busting -->
-    <script src="default_data.js?v=20261019_03"></script>
-    <script src="app.js?v=20261019_03"></script>
+    <script src="default_data.js?v=20261020_01"></script>
+    <script src="app.js?v=20261020_01"></script>
+    <script src="catalog_sync.js?v=20261020_01"></script>
 </body>
 </html>

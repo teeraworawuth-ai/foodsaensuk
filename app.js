@@ -264,6 +264,11 @@ function getCloudDelta() {
         }
     });
 
+    const subRecipes = {};
+    Object.values(appData.raw_materials || {}).forEach(rm => {
+        if (rm.sub_recipe) subRecipes[rm.id] = rm.sub_recipe;
+    });
+
     const modifiedDishes = {};
     (appData.dishes || []).forEach(dish => {
         if (dish.is_customized) {
@@ -290,6 +295,7 @@ function getCloudDelta() {
         last_sync: appData.restaurant_info.last_market_sync,
         customPrices,
         pieceWeights,
+        subRecipes,
         modifiedDishes
     };
 }
@@ -316,6 +322,16 @@ function applyCloudDelta(delta) {
                 rm.use_custom = true;
                 rm.custom_price = cData.custom_price;
                 rm.custom_price_display = cData.custom_price_display;
+                changed = true;
+            }
+        });
+    }
+
+    if (delta.subRecipes) {
+        Object.entries(delta.subRecipes).forEach(([rmId, sr]) => {
+            const rm = appData.raw_materials[rmId];
+            if (rm && JSON.stringify(rm.sub_recipe || null) !== JSON.stringify(sr)) {
+                rm.sub_recipe = sr;
                 changed = true;
             }
         });
@@ -584,6 +600,7 @@ function setupEventListeners() {
 function recalculateAllDishes() {
     if (!appData || !appData.dishes) return;
     ensurePieceProfiles();
+    computeSubRecipes();
     
     appData.dishes.forEach(dish => {
         let psCost = 0;
@@ -632,6 +649,13 @@ function recalculateAllDishes() {
 // 7-Day Market Sync Simulator (Simulates weekly price changes & broadcasts to all devices)
 function simulate7DayMarketSync() {
     if (!appData || !appData.raw_materials) return;
+
+    // Retired: random price simulation produced made-up prices which would now be shared with the
+    // stock app. Real prices come from purchase bills (🧾 รายการซื้อ).
+    const tabBtn = document.querySelector('.nav-tab[data-tab="purchases"]');
+    if (tabBtn) tabBtn.click();
+    showToast('ราคาจริงมาจากบิลซื้อในระบบสต็อก — ดูและยืนยันได้ที่หน้า 🧾 รายการซื้อ', 'info');
+    return;
 
     const rms = Object.values(appData.raw_materials);
     let changedCount = 0;
@@ -782,6 +806,8 @@ function renderCurrentTab() {
         renderReferenceGallery(content);
     } else if (currentTab === 'count-items') {
         renderCountItemsManager(content);
+    } else if (currentTab === 'purchases') {
+        if (window.renderPurchasesTab) renderPurchasesTab(content);
     }
 }
 
@@ -789,6 +815,7 @@ function renderAll() {
     renderKPIs();
     renderCategoryPills();
     renderCurrentTab();
+    if (window.CatalogSync) CatalogSync.updatePendingBadge();
 }
 
 // -------------------------------------------------------------------------
@@ -2561,6 +2588,7 @@ window.saveDishEditor = function(dishId) {
         const rm = appData.raw_materials[rmId];
         if (rm) {
             rm.use_custom = true;
+            rm.price_source = 'custom';
             rm.custom_price_display = pData.display_price;
             rm.custom_price = pData.effectivePrice;
             updatedRmList.push(rm);
@@ -2599,6 +2627,11 @@ window.saveDishEditor = function(dishId) {
 
     // 6. Save retained delta state in cloud 24/7 broker
     publishCloudDelta();
+    // 6b. Share prices / new ingredients with the stock app catalog
+    if (window.CatalogSync) {
+        updatedRmList.forEach(rm => CatalogSync.pushRm(rm.id, 'price'));
+        CatalogSync.pushMissing();
+    }
 
     // 7. Close modal and render all views
     closeDishEditor();
@@ -2608,6 +2641,223 @@ window.saveDishEditor = function(dishId) {
         ? `บันทึกสูตร "${currentEditingDish.name}" พร้อมซิงค์ราคา ${updatedRmList.length} วัตถุดิบไปยังทุกเมนูที่เกี่ยวข้องแล้ว!`
         : `บันทึกสูตร "${currentEditingDish.name}" สำเร็จและซิงค์ข้อมูลเรียลไทม์แล้ว!`;
     showToast(syncMsg);
+};
+
+// -------------------------------------------------------------------------
+// HOMEMADE ITEMS: sub-recipe calculator (น้ำจิ้ม / น้ำยำ / เบส / น้ำแกง ที่ร้านทำเอง)
+// rm.sub_recipe = { yield: <amount in display unit e.g. ลิตร>, extra: <บาท per batch>, items: [{ rm_id, qty (in that rm's unit) }] }
+// -------------------------------------------------------------------------
+const HOMEMADE_RM_IDS = ['RM_SAUCE_SEAFOOD', 'RM_SAUCE_YUM', 'RM_CURRY_SOUP_BASE', 'RM_CHILI_PASTE_EGG_BASE', 'RM_CHA_OM_EGG'];
+
+function isHomemadeRm(rm) {
+    return !!rm && (HOMEMADE_RM_IDS.includes(rm.id) || rm.homemade === true || !!rm.sub_recipe);
+}
+
+function rmUnitPrice(rm) {
+    return (rm.use_custom && rm.custom_price !== undefined) ? rm.custom_price : rm.market_price;
+}
+
+function subRecipeTotal(sr, selfId) {
+    let total = Number(sr.extra) || 0;
+    (sr.items || []).forEach(it => {
+        const src = appData.raw_materials[it.rm_id];
+        if (!src || src.id === selfId || src.sub_recipe) return; // one level only, no loops
+        total += (rmUnitPrice(src) || 0) * (Number(it.qty) || 0);
+    });
+    return total;
+}
+
+function computeSubRecipes() {
+    Object.values(appData.raw_materials || {}).forEach(rm => {
+        const sr = rm.sub_recipe;
+        if (!sr || !(Number(sr.yield) > 0)) return;
+        const factor = (rm.unit === 'g' || rm.unit === 'ml') ? 1000 : 1;
+        const total = subRecipeTotal(sr, rm.id);
+        const perUnit = total / (Number(sr.yield) * factor);
+        rm.use_custom = true;
+        rm.custom_price = Math.round(perUnit * 10000) / 10000;
+        rm.custom_price_display = Math.round(perUnit * factor * 100) / 100;
+        rm.price_source = 'recipe';
+        rm.sub_recipe_total = Math.round(total * 100) / 100;
+    });
+}
+
+function buildHomemadeSection() {
+    const list = Object.values(appData.raw_materials).filter(isHomemadeRm);
+    if (list.length === 0) return '';
+    const cards = list.map(rm => {
+        const price = rm.use_custom && rm.custom_price_display !== undefined ? rm.custom_price_display : rm.display_price;
+        const usedIn = appData.dishes.filter(d => (d.items || []).some(it => it.rm_id === rm.id && !it.disabled)).length;
+        const src = rm.sub_recipe
+            ? `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-purple-100 text-purple-800">คำนวณจากสูตร (${(rm.sub_recipe.items || []).length} วัตถุดิบ)</span>`
+            : rm.use_custom ? '<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">ใส่ราคาเอง</span>'
+            : '<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">ราคาเริ่มต้น (ยังไม่ได้ตั้ง)</span>';
+        return `
+            <div class="bg-white rounded-xl border border-slate-200 p-3">
+                <div class="font-black text-slate-900 text-sm">${rm.name}</div>
+                <div class="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-600">
+                    <strong class="text-base text-blue-800">${price}.-</strong>/${rm.display_unit} ${src}
+                    <span>• ใช้ใน ${usedIn} เมนู</span>
+                </div>
+                <div class="mt-2 flex flex-wrap gap-1.5">
+                    <button onclick="openSubRecipeEditor('${rm.id}')" class="px-2.5 py-1.5 text-xs font-bold rounded-lg bg-purple-600 text-white">🧮 ${rm.sub_recipe ? 'แก้สูตรย่อย' : 'คำนวณจากสูตร'}</button>
+                    ${rm.sub_recipe ? '' : `<span class="text-[11px] text-slate-500 self-center">หรือใส่ราคาเองในตารางด้านล่าง</span>`}
+                </div>
+            </div>`;
+    }).join('');
+    return `
+        <div class="bg-purple-50/60 rounded-2xl border border-purple-200 p-4 mb-5">
+            <h3 class="text-sm font-black text-purple-900">🥣 วัตถุดิบที่ร้านทำเอง (${list.length})</h3>
+            <p class="text-[11px] text-purple-800 mt-0.5 mb-3">ใส่ส่วนผสมและปริมาณที่ทำได้ ระบบคำนวณต้นทุนต่อหน่วยให้ และปรับตามเมื่อราคาวัตถุดิบเปลี่ยน (ไม่ส่งเข้าระบบสต็อก)</p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">${cards}</div>
+        </div>`;
+}
+
+let subRecipeDraft = null;
+
+window.openSubRecipeEditor = function(rmId) {
+    const rm = appData.raw_materials[rmId];
+    if (!rm) return;
+    const sr = rm.sub_recipe ? JSON.parse(JSON.stringify(rm.sub_recipe)) : { yield: 1, extra: 0, items: [{ rm_id: '', qty: '' }] };
+    subRecipeDraft = Object.assign({ rmId }, sr);
+    renderSubRecipeModal();
+};
+
+function subRecipeOptions(selected) {
+    return Object.values(appData.raw_materials)
+        .filter(r => !isHomemadeRm(r))
+        .sort((a, b) => a.name.localeCompare(b.name, 'th'))
+        .map(r => `<option value="${r.id}" ${r.id === selected ? 'selected' : ''}>${r.name} (${(r.use_custom && r.custom_price_display !== undefined ? r.custom_price_display : r.display_price)}.-/${r.display_unit})</option>`)
+        .join('');
+}
+
+function renderSubRecipeModal() {
+    const d = subRecipeDraft;
+    if (!d) return;
+    const rm = appData.raw_materials[d.rmId];
+    const rows = d.items.map((it, i) => {
+        const src = appData.raw_materials[it.rm_id];
+        const unit = src ? src.unit : '';
+        return `
+            <div class="flex items-center gap-1.5">
+                <select onchange="subRecipeSet(${i}, 'rm_id', this.value)" class="flex-1 min-w-0 text-xs p-1.5 border border-slate-300 rounded-lg bg-white">
+                    <option value="">— เลือกวัตถุดิบ —</option>${subRecipeOptions(it.rm_id)}
+                </select>
+                <input type="number" step="any" min="0" value="${it.qty}" placeholder="ปริมาณ" oninput="subRecipeSet(${i}, 'qty', this.value)" class="w-20 text-center text-xs font-bold p-1.5 border border-slate-300 rounded-lg" />
+                <span class="text-[11px] text-slate-600 w-8">${unit}</span>
+                <span class="text-[11px] font-bold text-slate-700 w-16 text-right" data-sr-line="${i}"></span>
+                <button onclick="subRecipeRemove(${i})" class="w-7 h-7 rounded-lg text-rose-600 hover:bg-rose-50">🗑️</button>
+            </div>`;
+    }).join('');
+
+    let overlay = document.getElementById('subrecipe-modal');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'subrecipe-modal';
+        overlay.className = 'fixed inset-0 z-[60] bg-slate-900/60 flex items-end sm:items-center justify-center p-0 sm:p-4 print:hidden';
+        document.body.appendChild(overlay);
+    }
+    overlay.innerHTML = `
+        <div class="bg-white w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl shadow-2xl max-h-[92vh] flex flex-col">
+            <div class="p-4 border-b border-slate-200">
+                <h3 class="text-base font-black text-slate-900">🧮 สูตรย่อย: ${rm.name}</h3>
+                <p class="text-xs text-slate-500 mt-0.5">ใส่ส่วนผสมของ 1 รอบการทำ (หน่วยตามวัตถุดิบ: g / ml / ฟอง ฯลฯ) และปริมาณที่ทำได้</p>
+            </div>
+            <div class="p-4 overflow-y-auto space-y-2">
+                ${rows}
+                <button onclick="subRecipeAdd()" class="w-full py-2 text-xs font-bold rounded-xl border border-dashed border-purple-300 text-purple-700 bg-purple-50">➕ เพิ่มส่วนผสม</button>
+                <div class="grid grid-cols-2 gap-2 pt-2">
+                    <label class="text-xs font-bold text-slate-700">ทำได้ทั้งหมด (${rm.display_unit})
+                        <input type="number" step="any" min="0" value="${d.yield}" oninput="subRecipeSetTop('yield', this.value)" class="mt-1 w-full text-sm font-black p-2 border border-slate-300 rounded-lg" />
+                    </label>
+                    <label class="text-xs font-bold text-slate-700">ต้นทุนอื่นต่อรอบ (บาท) เช่น แก๊ส/เครื่องปรุงเล็กน้อย
+                        <input type="number" step="any" min="0" value="${d.extra || 0}" oninput="subRecipeSetTop('extra', this.value)" class="mt-1 w-full text-sm font-black p-2 border border-slate-300 rounded-lg" />
+                    </label>
+                </div>
+                <div class="p-3 rounded-xl bg-purple-50 border border-purple-200 text-sm" id="sr-summary"></div>
+            </div>
+            <div class="p-3 border-t border-slate-200 flex flex-col sm:flex-row gap-2 sm:justify-end bg-slate-50 rounded-b-2xl">
+                ${rm.sub_recipe ? `<button onclick="removeSubRecipe()" class="px-3 py-2 text-xs font-bold rounded-xl bg-white border border-rose-300 text-rose-700">เลิกใช้สูตร (ใส่ราคาเอง)</button>` : ''}
+                <button onclick="closeSubRecipeEditor()" class="px-3 py-2 text-xs font-bold rounded-xl bg-white border border-slate-300 text-slate-600">ยกเลิก</button>
+                <button onclick="saveSubRecipe()" class="px-3 py-2 text-xs font-bold rounded-xl bg-purple-600 text-white">💾 บันทึกสูตรและใช้ราคานี้</button>
+            </div>
+        </div>`;
+    updateSubRecipeSummary();
+}
+
+function updateSubRecipeSummary() {
+    const d = subRecipeDraft;
+    if (!d) return;
+    const rm = appData.raw_materials[d.rmId];
+    d.items.forEach((it, i) => {
+        const src = appData.raw_materials[it.rm_id];
+        const el = document.querySelector(`[data-sr-line="${i}"]`);
+        if (el) el.textContent = src ? `${((rmUnitPrice(src) || 0) * (Number(it.qty) || 0)).toFixed(2)}.-` : '';
+    });
+    const total = subRecipeTotal(d, d.rmId);
+    const y = Number(d.yield) || 0;
+    const el = document.getElementById('sr-summary');
+    if (el) el.innerHTML = y > 0
+        ? `ต้นทุนรวมต่อรอบ <strong>${total.toFixed(2)}.-</strong> ÷ ${y} ${rm.display_unit} = <strong class="text-purple-800 text-base">${(total / y).toFixed(2)}.- / ${rm.display_unit}</strong>`
+        : 'กรอกปริมาณที่ทำได้ เพื่อคำนวณต้นทุนต่อหน่วย';
+}
+
+window.subRecipeSet = function(i, key, val) {
+    if (!subRecipeDraft || !subRecipeDraft.items[i]) return;
+    subRecipeDraft.items[i][key] = key === 'qty' ? val : val;
+    if (key === 'rm_id') renderSubRecipeModal(); else updateSubRecipeSummary();
+};
+window.subRecipeSetTop = function(key, val) {
+    if (!subRecipeDraft) return;
+    subRecipeDraft[key] = val;
+    updateSubRecipeSummary();
+};
+window.subRecipeAdd = function() {
+    if (!subRecipeDraft) return;
+    subRecipeDraft.items.push({ rm_id: '', qty: '' });
+    renderSubRecipeModal();
+};
+window.subRecipeRemove = function(i) {
+    if (!subRecipeDraft) return;
+    subRecipeDraft.items.splice(i, 1);
+    if (subRecipeDraft.items.length === 0) subRecipeDraft.items.push({ rm_id: '', qty: '' });
+    renderSubRecipeModal();
+};
+window.closeSubRecipeEditor = function() {
+    subRecipeDraft = null;
+    const el = document.getElementById('subrecipe-modal');
+    if (el) el.remove();
+};
+
+function afterSubRecipeChange(msg) {
+    recalculateAllDishes();
+    saveData(true);
+    publishCloudDelta();
+    window.closeSubRecipeEditor();
+    renderAll();
+    showToast(msg);
+}
+
+window.saveSubRecipe = function() {
+    const d = subRecipeDraft;
+    if (!d) return;
+    const items = d.items.filter(it => it.rm_id && Number(it.qty) > 0).map(it => ({ rm_id: it.rm_id, qty: Number(it.qty) }));
+    if (items.length === 0) { alert('กรุณาใส่ส่วนผสมอย่างน้อย 1 รายการ'); return; }
+    if (!(Number(d.yield) > 0)) { alert('กรุณากรอกปริมาณที่ทำได้'); return; }
+    const rm = appData.raw_materials[d.rmId];
+    rm.sub_recipe = { yield: Number(d.yield), extra: Number(d.extra) || 0, items };
+    afterSubRecipeChange(`🧮 บันทึกสูตรย่อย "${rm.name}" แล้ว ต้นทุนทุกเมนูที่ใช้อัปเดตแล้ว`);
+};
+
+window.removeSubRecipe = function() {
+    const d = subRecipeDraft;
+    if (!d) return;
+    const rm = appData.raw_materials[d.rmId];
+    if (!confirm(`เลิกใช้สูตรย่อยของ "${rm.name}"? (ราคาปัจจุบันจะถูกเก็บไว้เป็นราคาตั้งเอง)`)) return;
+    delete rm.sub_recipe;
+    delete rm.sub_recipe_total;
+    rm.price_source = 'custom';
+    afterSubRecipeChange(`เลิกใช้สูตรย่อยของ "${rm.name}" แล้ว`);
 };
 
 // -------------------------------------------------------------------------
@@ -2629,11 +2879,12 @@ function renderMarketPriceManager(container) {
                 </div>
                 <div class="flex items-center gap-2 w-full sm:w-auto">
                     <button onclick="simulate7DayMarketSync()" class="w-full sm:w-auto px-4 py-2 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white shadow-md flex items-center justify-center gap-1.5 transition-all">
-                        🔄 อัปเดตราคาตลาดรอบ 7 วัน
+                        🧾 ดูราคาจริงจากบิลซื้อ
                     </button>
                 </div>
             </div>
         </div>
+        ${buildHomemadeSection()}
 
         <div class="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-x-auto">
             <table class="w-full text-left text-xs text-slate-600 border-collapse">
@@ -2693,6 +2944,7 @@ function renderMarketPriceManager(container) {
                             ตั้งเอง
                         </button>
                     </div>
+                    ${rm.price_source === 'bill' ? '<div class="mt-1 text-[10px] font-bold text-emerald-700">🧾 ราคาจากบิลจริง</div>' : rm.price_source === 'recipe' ? '<div class="mt-1 text-[10px] font-bold text-purple-700">🧮 คำนวณจากสูตรย่อย</div>' : ''}
                 </td>
                 <td class="p-3 text-right font-black text-blue-700 whitespace-nowrap">
                     ${effectiveDisplay}.- <span class="text-[10px] font-normal text-slate-500">/ ${rm.display_unit}</span>
@@ -2730,6 +2982,7 @@ window.togglePriceMode = function(rmId, useCustom) {
     const rm = appData.raw_materials[rmId];
     if (!rm) return;
     rm.use_custom = useCustom;
+    rm.price_source = useCustom ? 'custom' : 'market';
     recalculateAllDishes();
     saveData(true);
     renderAll();
@@ -2745,6 +2998,8 @@ window.togglePriceMode = function(rmId, useCustom) {
 
     // Save to 24/7 cloud broker
     publishCloudDelta();
+    // Share with stock app (same price in both apps)
+    if (window.CatalogSync) CatalogSync.pushRm(rm.id, 'price');
 
     showToast(`เปลี่ยนโหมดราคา "${rm.name}" เป็น ${useCustom ? 'ราคาตั้งเอง' : 'ราคาตลาดอัตโนมัติ'}`);
 };
@@ -2764,6 +3019,7 @@ window.updateCustomPrice = function(rmId, val) {
         rm.custom_price = num;
     }
     rm.use_custom = true;
+    rm.price_source = 'custom';
 
     recalculateAllDishes();
     saveData(true);
@@ -2780,6 +3036,8 @@ window.updateCustomPrice = function(rmId, val) {
 
     // Save to 24/7 cloud broker
     publishCloudDelta();
+    // Share with stock app (same price in both apps)
+    if (window.CatalogSync) CatalogSync.pushRm(rm.id, 'price');
 
     showToast(`อัปเดตราคาตั้งเองสำหรับ "${rm.name}" เป็น ${num} บาทแล้ว`);
 };
